@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
 export type JobStatus =
   | "queued"
@@ -41,6 +43,9 @@ export interface KnowledgeSummary {
 export interface JobResult {
   video: {
     originalName: string;
+    sourceUrl?: string;
+    playbackUrl?: string;
+    embedUrl?: string;
     storedPath?: string;
     audioPath?: string;
   };
@@ -60,7 +65,8 @@ export interface JobRecord {
   result: JobResult | null;
 }
 
-const jobs = new Map<string, JobRecord>();
+const jobStorePath = path.resolve(process.env.JOBS_STORE_PATH || "uploads/jobs.json");
+const jobs = loadPersistedJobs();
 
 export function createJob(message = "任务已创建"): JobRecord {
   const now = new Date().toISOString();
@@ -75,6 +81,7 @@ export function createJob(message = "任务已创建"): JobRecord {
     result: null
   };
   jobs.set(job.id, job);
+  persistJobs();
   return job;
 }
 
@@ -98,5 +105,48 @@ export function updateJob(id: string, patch: Partial<JobRecord>): JobRecord {
     updatedAt: new Date().toISOString()
   };
   jobs.set(id, updated);
+  persistJobs();
   return updated;
+}
+
+function loadPersistedJobs(): Map<string, JobRecord> {
+  if (!existsSync(jobStorePath)) {
+    return new Map();
+  }
+
+  try {
+    const raw = readFileSync(jobStorePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return new Map();
+    }
+
+    const records = parsed.filter(isJobRecord);
+    return new Map(records.map((job) => [job.id, job]));
+  } catch {
+    return new Map();
+  }
+}
+
+function persistJobs() {
+  mkdirSync(path.dirname(jobStorePath), { recursive: true });
+  writeFileSync(jobStorePath, JSON.stringify([...jobs.values()], null, 2));
+}
+
+function isJobRecord(value: unknown): value is JobRecord {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === "string" &&
+    typeof record.status === "string" &&
+    typeof record.progress === "number" &&
+    typeof record.message === "string" &&
+    typeof record.createdAt === "string" &&
+    typeof record.updatedAt === "string" &&
+    (record.error === null || typeof record.error === "string") &&
+    (record.result === null || typeof record.result === "object")
+  );
 }

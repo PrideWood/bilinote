@@ -96,6 +96,23 @@ interface BilibiliPlayerResponse {
   };
 }
 
+interface BilibiliPlayUrlResponse {
+  code: number;
+  message: string;
+  data?: {
+    dash?: {
+      audio?: Array<{
+        id?: number;
+        bandwidth?: number;
+        baseUrl?: string;
+        base_url?: string;
+        backupUrl?: string[];
+        backup_url?: string[];
+      }>;
+    };
+  };
+}
+
 interface SubtitleCandidate {
   lan?: string;
   lan_doc?: string;
@@ -249,6 +266,34 @@ export async function fetchSubtitleLines(video: BilibiliVideoInfo): Promise<Subt
     lines: [],
     debug: buildSubtitleDebug(checked, candidates, undefined, attemptedCount)
   };
+}
+
+export async function fetchBilibiliAudioUrl(video: BilibiliVideoInfo): Promise<string> {
+  const url = new URL("https://api.bilibili.com/x/player/playurl");
+  url.searchParams.set("bvid", video.bvid);
+  url.searchParams.set("cid", String(video.cid));
+  url.searchParams.set("fnval", "16");
+  url.searchParams.set("fourk", "1");
+
+  const response = await fetch(url, { headers: buildHeaders(video.pageUrl) });
+  if (!response.ok) {
+    throw new Error(`获取 Bilibili 音频流失败：HTTP ${response.status}`);
+  }
+
+  const payload = (await response.json()) as BilibiliPlayUrlResponse;
+  if (payload.code !== 0) {
+    throw new Error(payload.message || "获取 Bilibili 音频流失败");
+  }
+
+  const audio = [...(payload.data?.dash?.audio ?? [])].sort(
+    (left, right) => (right.bandwidth ?? 0) - (left.bandwidth ?? 0)
+  )[0];
+  const audioUrl = audio?.baseUrl ?? audio?.base_url ?? audio?.backupUrl?.[0] ?? audio?.backup_url?.[0];
+  if (!audioUrl) {
+    throw new Error("该 Bilibili 视频未返回可用音频流");
+  }
+
+  return normalizeMediaUrl(audioUrl);
 }
 
 async function findSubtitleCandidates(
@@ -467,6 +512,10 @@ export function isTranscriptRelevantToTitle(title: string, lines: TranscriptLine
 }
 
 function normalizeSubtitleUrl(url: string): string {
+  return normalizeMediaUrl(url);
+}
+
+function normalizeMediaUrl(url: string): string {
   const decodedUrl = url.replaceAll("\\u002F", "/").replaceAll("\\/", "/");
   if (decodedUrl.startsWith("//")) {
     return `https:${decodedUrl}`;

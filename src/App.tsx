@@ -1,5 +1,6 @@
 import {
   type CSSProperties,
+  type FormEvent,
   type PointerEvent as ReactPointerEvent,
   useEffect,
   useMemo,
@@ -56,6 +57,9 @@ interface JobRecord {
   result: null | {
     video: {
       originalName: string;
+      sourceUrl?: string;
+      playbackUrl?: string;
+      embedUrl?: string;
       storedPath?: string;
       audioPath?: string;
     };
@@ -76,6 +80,9 @@ interface JobListItem {
   result: null | {
     video: {
       originalName: string;
+      sourceUrl?: string;
+      playbackUrl?: string;
+      embedUrl?: string;
       storedPath?: string;
       audioPath?: string;
     };
@@ -86,16 +93,175 @@ interface JobListItem {
 
 const detailTabs = ["笔记", "转录", "知识点"] as const;
 type DetailTab = (typeof detailTabs)[number];
+type AppLanguage = "zh" | "en";
+type AppTheme = "light" | "dark";
+type ThemePreference = AppTheme | null;
+
+const copy = {
+  zh: {
+    settings: "设置",
+    language: "界面语言",
+    displayMode: "显示模式",
+    light: "浅色",
+    dark: "深色",
+    githubPending: "GitHub 仓库待添加",
+    startSubtitle: "粘贴在线视频链接，或上传本地视频，转写完成后会沉淀到下方历史中。",
+    urlPlaceholder: "粘贴 Bilibili / YouTube / 视频直链",
+    transcribe: "转写",
+    processing: "处理中...",
+    uploadVideo: "上传本地视频",
+    history: "历史视频",
+    searchHistory: "搜索历史视频标题",
+    video: "视频",
+    createdAt: "创建时间",
+    status: "状态",
+    noHistoryTitle: "还没有处理过的视频",
+    noHistoryBody: "粘贴链接或上传本地视频，完成后会出现在这里。",
+    emptyTitle: "处理中任务",
+    renameRequired: "标题不能为空",
+    renameFailed: "重命名失败",
+    save: "保存",
+    cancel: "取消",
+    editTitle: "编辑标题",
+    notes: "笔记",
+    transcript: "转录",
+    knowledge: "知识点",
+    exportTxt: "导出 TXT",
+    exportSrt: "导出 SRT",
+    exportMd: "导出 MD 笔记",
+    saveObsidian: "保存到 Obsidian",
+    saving: "保存中...",
+    sideBySide: "并列学习",
+    noPlayableVideo: "当前任务没有可播放的视频文件",
+    noPlayableUrl: "当前任务没有可播放的视频地址",
+    transcriptEmpty: "暂无 transcript",
+    transcriptNoMatch: "没有匹配的转录文本",
+    notesEmpty: "总结生成后会显示在这里",
+    knowledgeEmpty: "知识点生成后会显示在这里",
+    overview: "概览",
+    coreConclusions: "核心结论",
+    logicFlow: "逻辑脉络",
+    unnamedKnowledge: "知识点",
+    none: "暂无内容",
+    savedTo: "已保存到"
+  },
+  en: {
+    settings: "Settings",
+    language: "Language",
+    displayMode: "Appearance",
+    light: "Light",
+    dark: "Dark",
+    githubPending: "GitHub repository pending",
+    startSubtitle: "Paste an online video link or upload a local video. Finished notes will appear in history below.",
+    urlPlaceholder: "Paste a Bilibili / YouTube / direct video link",
+    transcribe: "Transcribe",
+    processing: "Processing...",
+    uploadVideo: "Upload local video",
+    history: "History",
+    searchHistory: "Search video titles",
+    video: "Video",
+    createdAt: "Created",
+    status: "Status",
+    noHistoryTitle: "No videos yet",
+    noHistoryBody: "Paste a link or upload a local video. Finished jobs will appear here.",
+    emptyTitle: "Processing job",
+    renameRequired: "Title is required",
+    renameFailed: "Rename failed",
+    save: "Save",
+    cancel: "Cancel",
+    editTitle: "Edit title",
+    notes: "Notes",
+    transcript: "Transcript",
+    knowledge: "Knowledge",
+    exportTxt: "Export TXT",
+    exportSrt: "Export SRT",
+    exportMd: "Export Markdown",
+    saveObsidian: "Save to Obsidian",
+    saving: "Saving...",
+    sideBySide: "Side by side",
+    noPlayableVideo: "No playable video file for this job",
+    noPlayableUrl: "No playable video URL for this job",
+    transcriptEmpty: "No transcript yet",
+    transcriptNoMatch: "No matching transcript lines",
+    notesEmpty: "Notes will appear after summarization",
+    knowledgeEmpty: "Knowledge points will appear after summarization",
+    overview: "Overview",
+    coreConclusions: "Core conclusions",
+    logicFlow: "Logic flow",
+    unnamedKnowledge: "Knowledge point",
+    none: "Nothing yet",
+    savedTo: "Saved to"
+  }
+} as const;
+
+type CopyKey = keyof typeof copy.zh;
 
 export default function App() {
   const [jobs, setJobs] = useState<JobListItem[]>([]);
-  const [selectedJobId, setSelectedJobId] = useState("");
+  const [selectedJobId, setSelectedJobId] = useState(
+    () => new URLSearchParams(window.location.search).get("job") ?? ""
+  );
   const [selectedJob, setSelectedJob] = useState<JobRecord | null>(null);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [query, setQuery] = useState("");
+  const [onlineUrl, setOnlineUrl] = useState("");
   const [activeDetailTab, setActiveDetailTab] = useState<DetailTab>("转录");
+  const [embedSeek, setEmbedSeek] = useState<{ seconds: number; nonce: number } | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [language, setLanguage] = useState<AppLanguage>(
+    () => (window.localStorage.getItem("bilinote-language") === "en" ? "en" : "zh")
+  );
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => getStoredThemePreference());
+  const [systemTheme, setSystemTheme] = useState<AppTheme>(() => getSystemTheme());
+  const theme = themePreference ?? systemTheme;
+  const settingsCloseTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateSystemTheme = () => setSystemTheme(query.matches ? "dark" : "light");
+    updateSystemTheme();
+    query.addEventListener("change", updateSystemTheme);
+    return () => query.removeEventListener("change", updateSystemTheme);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
+  useEffect(() => {
+    if (themePreference) {
+      window.localStorage.setItem("bilinote-theme", themePreference);
+    } else {
+      window.localStorage.removeItem("bilinote-theme");
+    }
+  }, [themePreference]);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const t = (key: CopyKey) => copy[language][key];
+
+  function cancelSettingsClose() {
+    if (settingsCloseTimerRef.current !== null) {
+      window.clearTimeout(settingsCloseTimerRef.current);
+      settingsCloseTimerRef.current = null;
+    }
+  }
+
+  function scheduleSettingsClose() {
+    cancelSettingsClose();
+    settingsCloseTimerRef.current = window.setTimeout(() => {
+      setSettingsOpen(false);
+      settingsCloseTimerRef.current = null;
+    }, 300);
+  }
+
+  useEffect(() => {
+    return () => cancelSettingsClose();
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("bilinote-language", language);
+  }, [language]);
 
   useEffect(() => {
     void loadJobs();
@@ -170,9 +336,48 @@ export default function App() {
 
       setActiveDetailTab("转录");
       setSelectedJobId(payload.jobId);
+      setJobQueryParam(payload.jobId);
       void loadJobs();
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建任务失败");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleOnlineVideoSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const url = onlineUrl.trim();
+    if (!url) {
+      return;
+    }
+
+    setError("");
+    setSubmitting(true);
+
+    try {
+      const response = await fetch("/api/jobs/url", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          url,
+          notes: ""
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error ?? "创建在线视频任务失败");
+      }
+
+      setOnlineUrl("");
+      setActiveDetailTab("转录");
+      setSelectedJobId(payload.jobId);
+      setJobQueryParam(payload.jobId);
+      void loadJobs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "创建在线视频任务失败");
     } finally {
       setSubmitting(false);
     }
@@ -182,8 +387,13 @@ export default function App() {
   const activeJob = selectedJob ?? selectedListItem;
   const summary = selectedJob?.result?.summary;
   const transcript = selectedJob?.result?.transcript ?? [];
-  const statusLabel = formatStatus(activeJob?.status);
-  const hasPlayableVideo = Boolean(selectedJob?.id && selectedJob.result?.video.storedPath);
+  const statusLabel = formatStatus(activeJob?.status, language);
+  const hasPlayableVideo = Boolean(
+    selectedJob?.id &&
+      (selectedJob.result?.video.storedPath ||
+        selectedJob.result?.video.playbackUrl ||
+        selectedJob.result?.video.embedUrl)
+  );
   const filteredJobs = useMemo(() => {
     const keyword = query.trim().toLowerCase();
     if (!keyword) {
@@ -196,13 +406,27 @@ export default function App() {
 
   function openJob(id: string) {
     setError("");
+    setEmbedSeek(null);
     setActiveDetailTab("转录");
     setSelectedJobId(id);
+    setJobQueryParam(id);
+  }
+
+  function closeJob() {
+    setSelectedJobId("");
+    setJobQueryParam("");
   }
 
   function seekTo(seconds: number) {
     const player = videoRef.current;
-    if (!player || !Number.isFinite(seconds)) {
+    if (!Number.isFinite(seconds)) {
+      return;
+    }
+    if (!player) {
+      setEmbedSeek((current) => ({
+        seconds: Math.max(0, seconds),
+        nonce: (current?.nonce ?? 0) + 1
+      }));
       return;
     }
     player.currentTime = Math.max(0, seconds);
@@ -220,26 +444,87 @@ export default function App() {
               <span>B</span>
               <strong>BiliNote</strong>
             </div>
-            <div className="search-box">
-              <span>⌕</span>
-              <input
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索历史视频标题"
-                value={query}
-              />
+            <div className="topbar-actions">
+              <div
+                className="settings-menu"
+                onMouseEnter={cancelSettingsClose}
+                onMouseLeave={scheduleSettingsClose}
+              >
+                <button
+                  aria-label="设置"
+                  className="icon-action"
+                  onClick={() => {
+                    cancelSettingsClose();
+                    setSettingsOpen(true);
+                  }}
+                  onFocus={cancelSettingsClose}
+                  onBlur={scheduleSettingsClose}
+                  title={t("settings")}
+                  type="button"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+                    <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2a2 2 0 0 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H2.8a2 2 0 0 1 0-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7A2 2 0 1 1 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2a2 2 0 0 1 4 0V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2a2 2 0 0 1 0 4H21a1.7 1.7 0 0 0-1.6 1Z" />
+                  </svg>
+                </button>
+                {settingsOpen && (
+                  <div
+                    className="settings-dropdown"
+                    onFocus={cancelSettingsClose}
+                    onBlur={scheduleSettingsClose}
+                  >
+                    <div className="setting-row">
+                      <span>{t("language")}</span>
+                      <div className="segmented-control">
+                        <button
+                          className={language === "zh" ? "active" : ""}
+                          onClick={() => setLanguage("zh")}
+                          type="button"
+                        >
+                          中
+                        </button>
+                        <button
+                          className={language === "en" ? "active" : ""}
+                          onClick={() => setLanguage("en")}
+                          type="button"
+                        >
+                          EN
+                        </button>
+                      </div>
+                    </div>
+                    <div className="setting-row">
+                      <span>{t("displayMode")}</span>
+                      <div className="segmented-control">
+                        <button
+                          className={theme === "light" ? "active" : ""}
+                          onClick={() => setThemePreference("light")}
+                          type="button"
+                        >
+                          {t("light")}
+                        </button>
+                        <button
+                          className={theme === "dark" ? "active" : ""}
+                          onClick={() => setThemePreference("dark")}
+                          type="button"
+                        >
+                          {t("dark")}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <button
+                aria-label={t("githubPending")}
+                className="icon-action github-action"
+                title={t("githubPending")}
+                type="button"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M12 .5A11.5 11.5 0 0 0 8.4 23c.6.1.8-.3.8-.6v-2.1c-3.4.7-4.1-1.5-4.1-1.5-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 .1.6 2.8 3.4 2 .1-.8.4-1.4.8-1.8-2.7-.3-5.5-1.4-5.5-6.1 0-1.4.5-2.5 1.2-3.3-.1-.3-.5-1.6.1-3.3 0 0 1-.3 3.4 1.3a11.8 11.8 0 0 1 6.2 0C17.7 4.7 18.7 5 18.7 5c.6 1.7.2 3 .1 3.3.8.9 1.2 2 1.2 3.3 0 4.7-2.8 5.8-5.5 6.1.5.4.9 1.2.9 2.4v2.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5Z" />
+                </svg>
+              </button>
             </div>
-            <label className={`primary-action ${submitting ? "busy" : ""}`}>
-              <input
-                accept=".mp4,.mov,.mkv,.webm,video/*"
-                disabled={submitting}
-                type="file"
-                onChange={(event) => {
-                  void handleVideoUpload(event.target.files?.[0]);
-                  event.currentTarget.value = "";
-                }}
-              />
-              {submitting ? "处理中..." : "Upload"}
-            </label>
           </header>
         )}
 
@@ -248,9 +533,10 @@ export default function App() {
         {selectedJobId ? (
           <DetailView
             activeTab={activeDetailTab}
+            embedSeek={embedSeek}
             hasPlayableVideo={hasPlayableVideo}
             job={selectedJob}
-            onBack={() => setSelectedJobId("")}
+            onBack={closeJob}
             onChangeTab={setActiveDetailTab}
             onJobUpdate={setSelectedJob}
             onSeek={seekTo}
@@ -258,9 +544,25 @@ export default function App() {
             summary={summary}
             transcript={transcript}
             videoRef={videoRef}
+            t={t}
+            language={language}
           />
         ) : (
-          <HomeView jobs={filteredJobs} onOpenJob={openJob} />
+          <HomeView
+            jobs={filteredJobs}
+            onlineUrl={onlineUrl}
+            onChangeOnlineUrl={setOnlineUrl}
+            onChangeQuery={setQuery}
+            onJobUpdate={setSelectedJob}
+            onReloadJobs={loadJobs}
+            onOpenJob={openJob}
+            onSubmitOnlineVideo={handleOnlineVideoSubmit}
+            onUploadVideo={handleVideoUpload}
+            query={query}
+            submitting={submitting}
+            t={t}
+            language={language}
+          />
         )}
       </section>
     </main>
@@ -269,59 +571,244 @@ export default function App() {
 
 function HomeView({
   jobs,
-  onOpenJob
+  onlineUrl,
+  onChangeOnlineUrl,
+  onChangeQuery,
+  onJobUpdate,
+  onReloadJobs,
+  onOpenJob,
+  onSubmitOnlineVideo,
+  onUploadVideo,
+  query,
+  submitting,
+  t,
+  language
 }: {
   jobs: JobListItem[];
+  onlineUrl: string;
+  onChangeOnlineUrl: (value: string) => void;
+  onChangeQuery: (value: string) => void;
+  onJobUpdate: (job: JobRecord) => void;
+  onReloadJobs: () => Promise<void>;
   onOpenJob: (id: string) => void;
+  onSubmitOnlineVideo: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  onUploadVideo: (file: File | undefined) => Promise<void>;
+  query: string;
+  submitting: boolean;
+  t: (key: CopyKey) => string;
+  language: AppLanguage;
 }) {
+  const [editingJobId, setEditingJobId] = useState("");
+  const [draftTitle, setDraftTitle] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const [renameError, setRenameError] = useState("");
+
+  async function saveTitle(jobId: string) {
+    const title = draftTitle.trim();
+    if (!title) {
+      setRenameError(t("renameRequired"));
+      return;
+    }
+
+    setRenaming(true);
+    setRenameError("");
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/title`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ title })
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error ?? t("renameFailed"));
+      }
+
+      onJobUpdate(payload);
+      await onReloadJobs();
+      setEditingJobId("");
+      setDraftTitle("");
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : t("renameFailed"));
+    } finally {
+      setRenaming(false);
+    }
+  }
+
   return (
     <section className="home-view">
-      <div className="list-header">
-        <h1>历史视频</h1>
-      </div>
-
-      <div className="history-table">
-        <div className="table-head">
-          <span>视频</span>
-          <span>创建时间</span>
-          <span>状态</span>
+      <section className="start-panel">
+        <div className="start-copy">
+          <img alt="BiliNote" className="start-logo" src="/bilinote-logo.png" />
+          <p>{t("startSubtitle")}</p>
         </div>
+        <form className="url-submit home-url-submit" onSubmit={(event) => void onSubmitOnlineVideo(event)}>
+          <input
+            disabled={submitting}
+            onChange={(event) => onChangeOnlineUrl(event.target.value)}
+            placeholder={t("urlPlaceholder")}
+            value={onlineUrl}
+          />
+          <button disabled={submitting || onlineUrl.trim().length === 0} type="submit">
+            {submitting ? t("processing") : t("transcribe")}
+          </button>
+        </form>
+        <div className="start-actions">
+          <label className={`primary-action upload-action ${submitting ? "busy" : ""}`}>
+            <input
+              accept=".mp4,.mov,.mkv,.webm,video/*"
+              disabled={submitting}
+              type="file"
+              onChange={(event) => {
+                void onUploadVideo(event.target.files?.[0]);
+                event.currentTarget.value = "";
+              }}
+            />
+            {t("uploadVideo")}
+          </label>
+        </div>
+      </section>
+
+      <section className="history-section">
+        <div className="list-header">
+          <h1>{t("history")}</h1>
+          <div className="search-box history-search">
+            <span>⌕</span>
+            <input
+              onChange={(event) => onChangeQuery(event.target.value)}
+              placeholder={t("searchHistory")}
+              value={query}
+            />
+          </div>
+        </div>
+
+        <div className="history-table">
+        <div className="table-head">
+          <span>{t("video")}</span>
+          <span>{t("createdAt")}</span>
+          <span>{t("status")}</span>
+        </div>
+        {renameError && <div className="notice error history-error">{renameError}</div>}
         {jobs.length === 0 ? (
           <div className="empty-state">
-            <h2>还没有处理过的视频</h2>
-            <p>点击右上角 Upload 选择本地视频，完成后会出现在这里。</p>
+            <h2>{t("noHistoryTitle")}</h2>
+            <p>{t("noHistoryBody")}</p>
           </div>
         ) : (
-          jobs.map((job) => (
-            <button className="history-row" key={job.id} onClick={() => onOpenJob(job.id)} type="button">
+          jobs.map((job) => {
+            const title = job.result?.video.originalName ?? t("emptyTitle");
+            const isEditing = editingJobId === job.id;
+
+            return (
+            <div
+              className={`history-row ${isEditing ? "editing" : ""}`}
+              key={job.id}
+              onClick={() => {
+                if (!isEditing) {
+                  onOpenJob(job.id);
+                }
+              }}
+              role="button"
+              tabIndex={isEditing ? -1 : 0}
+              onKeyDown={(event) => {
+                if (!isEditing && (event.key === "Enter" || event.key === " ")) {
+                  event.preventDefault();
+                  onOpenJob(job.id);
+                }
+              }}
+            >
               <span className="item-cell">
                 <span className="thumbnail">
                   {job.result?.video.storedPath ? (
                     <video muted preload="metadata" src={`/api/jobs/${job.id}/video`} />
+                  ) : job.result?.video.sourceUrl ? (
+                    <span>URL</span>
                   ) : (
                     <span>{job.progress}%</span>
                   )}
                 </span>
-                <span>
-                  <strong>{job.result?.video.originalName ?? "处理中任务"}</strong>
+                <span className="history-title-wrap">
+                  {isEditing ? (
+                    <form
+                      className="rename-form"
+                      onClick={(event) => event.stopPropagation()}
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void saveTitle(job.id);
+                      }}
+                    >
+                      <input
+                        autoFocus
+                        disabled={renaming}
+                        onChange={(event) => setDraftTitle(event.target.value)}
+                        value={draftTitle}
+                      />
+                      <button disabled={renaming} type="submit">
+                        {t("save")}
+                      </button>
+                      <button
+                        disabled={renaming}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setEditingJobId("");
+                          setDraftTitle("");
+                          setRenameError("");
+                        }}
+                        type="button"
+                      >
+                        {t("cancel")}
+                      </button>
+                    </form>
+                  ) : (
+                    <span className="history-title-line">
+                      <span className="history-title-button">
+                        <strong>{title}</strong>
+                      </span>
+                      {job.result && (
+                        <button
+                          aria-label={t("editTitle")}
+                          className="title-edit-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setEditingJobId(job.id);
+                            setDraftTitle(title);
+                            setRenameError("");
+                          }}
+                          title={t("editTitle")}
+                          type="button"
+                        >
+                          <svg aria-hidden="true" viewBox="0 0 20 20">
+                            <path d="M4 14.7V17h2.3L15 8.3 12.7 6 4 14.7Z" />
+                            <path d="M13.5 5.2 14.8 4a1.4 1.4 0 0 1 2 2l-1.2 1.3-2.1-2.1Z" />
+                          </svg>
+                        </button>
+                      )}
+                    </span>
+                  )}
                   <small>
                     {formatDuration(job.result?.duration ?? 0)}
-                    {job.status !== "done" ? ` · ${formatStatus(job.status)} ${job.progress}%` : ""}
+                    {job.status !== "done" ? ` · ${formatStatus(job.status, language)} ${job.progress}%` : ""}
                   </small>
                 </span>
               </span>
               <span>{formatDate(job.createdAt)}</span>
-              <span>{formatStatus(job.status)}{job.status !== "done" ? ` ${job.progress}%` : ""}</span>
-            </button>
-          ))
+              <span className="history-status-cell">
+                <span>{formatStatus(job.status, language)}{job.status !== "done" ? ` ${job.progress}%` : ""}</span>
+              </span>
+            </div>
+            );
+          })
         )}
-      </div>
+        </div>
+      </section>
     </section>
   );
 }
 
 function DetailView({
   activeTab,
+  embedSeek,
   hasPlayableVideo,
   job,
   onBack,
@@ -331,9 +818,12 @@ function DetailView({
   statusLabel,
   summary,
   transcript,
-  videoRef
+  videoRef,
+  t,
+  language
 }: {
   activeTab: DetailTab;
+  embedSeek: { seconds: number; nonce: number } | null;
   hasPlayableVideo: boolean;
   job: JobRecord | null;
   onBack: () => void;
@@ -344,15 +834,21 @@ function DetailView({
   summary?: KnowledgeSummary;
   transcript: TranscriptSegment[];
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  t: (key: CopyKey) => string;
+  language: AppLanguage;
 }) {
-  const title = job?.result?.video.originalName ?? "正在加载视频";
+  const title = job?.result?.video.originalName ?? t("emptyTitle");
   const [exportOpen, setExportOpen] = useState(false);
   const [textQuery, setTextQuery] = useState("");
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [savingNote, setSavingNote] = useState(false);
+  const [noteMessage, setNoteMessage] = useState("");
   const [videoWidth, setVideoWidth] = useState(57);
   const [draftTranscript, setDraftTranscript] = useState<TranscriptSegment[]>(transcript);
   const detailGridRef = useRef<HTMLDivElement | null>(null);
+  const sourceUrl = job?.result?.video.sourceUrl;
+  const jobId = job?.id;
 
   useEffect(() => {
     if (!editing) {
@@ -377,12 +873,40 @@ function DetailView({
       });
       const payload = await response.json();
       if (!response.ok) {
-        throw new Error(payload.error ?? "保存转录失败");
+        throw new Error(payload.error ?? t("renameFailed"));
       }
       onJobUpdate(payload);
       setEditing(false);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveNotesToObsidian() {
+    if (!job?.id) {
+      return;
+    }
+
+    setSavingNote(true);
+    setNoteMessage("");
+    try {
+      const response = await fetch(`/api/jobs/${job.id}/save-obsidian`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error ?? t("saveObsidian"));
+      }
+      setExportOpen(false);
+      setNoteMessage(`${t("savedTo")} ${payload.path}`);
+    } catch (err) {
+      setNoteMessage(err instanceof Error ? err.message : t("saveObsidian"));
+    } finally {
+      setSavingNote(false);
     }
   }
 
@@ -431,13 +955,18 @@ function DetailView({
             </button>
             {exportOpen && (
               <div className="export-dropdown">
-                <a href={`/api/jobs/${job.id}/transcript.txt`}>导出 TXT</a>
-                <a href={`/api/jobs/${job.id}/transcript.srt`}>导出 SRT</a>
+                <a href={`/api/jobs/${job.id}/transcript.txt`}>{t("exportTxt")}</a>
+                <a href={`/api/jobs/${job.id}/transcript.srt`}>{t("exportSrt")}</a>
+                <a href={`/api/jobs/${job.id}/notes.md`}>{t("exportMd")}</a>
+                <button disabled={savingNote} onClick={() => void saveNotesToObsidian()} type="button">
+                  {savingNote ? t("saving") : t("saveObsidian")}
+                </button>
               </div>
             )}
           </div>
         )}
       </header>
+      {noteMessage && <div className="notice inline-notice">{noteMessage}</div>}
 
       <div
         className="detail-grid"
@@ -448,16 +977,21 @@ function DetailView({
       >
         <section className="video-column">
           {hasPlayableVideo ? (
-            <video controls preload="metadata" ref={videoRef} src={`/api/jobs/${job?.id}/video`} />
+            <OnlinePlayer embedSeek={embedSeek} job={job} videoRef={videoRef} t={t} />
           ) : (
             <div className="video-placeholder">
-              {job?.status === "done" ? "当前任务没有可播放的视频文件" : `${statusLabel} ${job?.progress ?? 0}%`}
+              {job?.status === "done" ? t("noPlayableVideo") : `${statusLabel} ${job?.progress ?? 0}%`}
             </div>
           )}
           <div className="video-meta-panel">
             <span>{formatDuration(lastTranscriptTime(transcript))}</span>
             <span>{transcript.length} 段转录</span>
             <span>{statusLabel}</span>
+            {jobId && sourceUrl && (
+              <button onClick={() => openSideBySide(jobId, sourceUrl)} type="button">
+                {t("sideBySide")}
+              </button>
+            )}
           </div>
         </section>
 
@@ -478,7 +1012,7 @@ function DetailView({
                   onClick={() => onChangeTab(tab)}
                   type="button"
                 >
-                  {tab}
+                  {tabLabel(tab, language)}
                 </button>
               ))}
             </div>
@@ -503,7 +1037,7 @@ function DetailView({
                       }}
                       type="button"
                     >
-                      取消
+                      {t("cancel")}
                     </button>
                     <button
                       className="edit-button"
@@ -511,7 +1045,7 @@ function DetailView({
                       onClick={() => void saveTranscript()}
                       type="button"
                     >
-                      {saving ? "保存中" : "保存"}
+                      {saving ? t("saving") : t("save")}
                     </button>
                   </div>
                 ) : (
@@ -521,7 +1055,7 @@ function DetailView({
                     onClick={() => setEditing(true)}
                     type="button"
                   >
-                    编辑
+                    {t("editTitle")}
                   </button>
                 )
               )}
@@ -535,11 +1069,12 @@ function DetailView({
               onSeek={onSeek}
               query={textQuery}
               transcript={editing ? draftTranscript : transcript}
+              t={t}
             />
           )}
-          {activeTab === "笔记" && <NotesPane summary={summary} />}
+          {activeTab === "笔记" && <NotesPane summary={summary} t={t} />}
           {activeTab === "知识点" && (
-            <KnowledgePane onSeek={onSeek} summary={summary} transcript={transcript} />
+            <KnowledgePane onSeek={onSeek} summary={summary} transcript={transcript} t={t} />
           )}
         </aside>
       </div>
@@ -547,21 +1082,58 @@ function DetailView({
   );
 }
 
+function OnlinePlayer({
+  embedSeek,
+  job,
+  videoRef,
+  t
+}: {
+  embedSeek: { seconds: number; nonce: number } | null;
+  job: JobRecord | null;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  t: (key: CopyKey) => string;
+}) {
+  const video = job?.result?.video;
+  const localVideoUrl = job?.id && video?.storedPath ? `/api/jobs/${job.id}/video` : undefined;
+  const directVideoUrl = localVideoUrl ?? video?.playbackUrl;
+
+  if (directVideoUrl) {
+    return <video controls preload="metadata" ref={videoRef} src={directVideoUrl} />;
+  }
+
+  if (video?.embedUrl) {
+    return (
+      <iframe
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+        allowFullScreen
+        className="video-embed"
+        key={`${job?.id ?? "online"}-${embedSeek?.nonce ?? 0}`}
+        src={withStartTime(video.embedUrl, embedSeek?.seconds)}
+        title={video.originalName}
+      />
+    );
+  }
+
+  return <div className="video-placeholder">{t("noPlayableUrl")}</div>;
+}
+
 function TranscriptPane({
   editing,
   onChangeDraft,
   onSeek,
   query,
-  transcript
+  transcript,
+  t
 }: {
   editing: boolean;
   onChangeDraft: (segments: TranscriptSegment[]) => void;
   onSeek: (seconds: number) => void;
   query: string;
   transcript: TranscriptSegment[];
+  t: (key: CopyKey) => string;
 }) {
   if (transcript.length === 0) {
-    return <div className="empty-state compact-empty">暂无 transcript</div>;
+    return <div className="empty-state compact-empty">{t("transcriptEmpty")}</div>;
   }
 
   const keyword = query.trim().toLowerCase();
@@ -575,7 +1147,7 @@ function TranscriptPane({
   return (
     <div className="transcript-stream">
       {visibleTranscript.length === 0 ? (
-        <div className="empty-state compact-empty">没有匹配的转录文本</div>
+        <div className="empty-state compact-empty">{t("transcriptNoMatch")}</div>
       ) : (
         visibleTranscript.slice(0, 500).map((item) => {
           const originalIndex = transcript.findIndex(
@@ -618,23 +1190,23 @@ function TranscriptPane({
   );
 }
 
-function NotesPane({ summary }: { summary?: KnowledgeSummary }) {
+function NotesPane({ summary, t }: { summary?: KnowledgeSummary; t: (key: CopyKey) => string }) {
   if (!summary) {
-    return <div className="empty-state compact-empty">总结生成后会显示在这里</div>;
+    return <div className="empty-state compact-empty">{t("notesEmpty")}</div>;
   }
 
   return (
     <div className="notes-stream">
       <article>
-        <h2>概览</h2>
+        <h2>{t("overview")}</h2>
         <p>{summary.overview}</p>
       </article>
       <article>
-        <h2>核心结论</h2>
+        <h2>{t("coreConclusions")}</h2>
         <List items={summary.coreConclusions} />
       </article>
       <article>
-        <h2>逻辑脉络</h2>
+        <h2>{t("logicFlow")}</h2>
         {summary.logicFlow.map((item, index) => (
           <p key={`${item.title}-${index}`}>
             <strong>{item.title || `Step ${index + 1}`}</strong>：{item.explanation}
@@ -648,39 +1220,26 @@ function NotesPane({ summary }: { summary?: KnowledgeSummary }) {
 function KnowledgePane({
   onSeek,
   summary,
-  transcript
+  transcript,
+  t
 }: {
   onSeek: (seconds: number) => void;
   summary?: KnowledgeSummary;
   transcript: TranscriptSegment[];
+  t: (key: CopyKey) => string;
 }) {
   if (!summary) {
-    return <div className="empty-state compact-empty">知识点生成后会显示在这里</div>;
+    return <div className="empty-state compact-empty">{t("knowledgeEmpty")}</div>;
   }
 
   return (
     <div className="notes-stream">
       {summary.knowledgeTree.map((item, index) => (
         <article key={`${item.topic}-${index}`}>
-          <h2>{item.topic || `知识点 ${index + 1}`}</h2>
+          <h2>{item.topic || `${t("unnamedKnowledge")} ${index + 1}`}</h2>
           <TimedList items={item.points} onSeek={onSeek} transcript={transcript} />
         </article>
       ))}
-      <article>
-        <h2>时间轴</h2>
-        <div className="timeline-list">
-          {summary.timelineNotes.map((item, index) => (
-            <button
-              key={`${item.timestamp}-${index}`}
-              onClick={() => onSeek(timestampToSeconds(item.timestamp))}
-              type="button"
-            >
-              <time>{item.timestamp || "--:--"}</time>
-              <span>{item.note}</span>
-            </button>
-          ))}
-        </div>
-      </article>
     </div>
   );
 }
@@ -742,6 +1301,67 @@ function extractTimestamp(text: string): string | undefined {
 
 function stripLeadingTimestamp(text: string): string {
   return text.replace(/^\s*\[?(?:\d{1,2}:)?\d{1,2}:\d{2}\]?\s*[-:：]?\s*/, "");
+}
+
+function setJobQueryParam(jobId: string) {
+  const url = new URL(window.location.href);
+  if (jobId) {
+    url.searchParams.set("job", jobId);
+  } else {
+    url.searchParams.delete("job");
+  }
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function getStoredThemePreference(): ThemePreference {
+  const value = window.localStorage.getItem("bilinote-theme");
+  return value === "light" || value === "dark" ? value : null;
+}
+
+function getSystemTheme(): AppTheme {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function openSideBySide(jobId: string, sourceUrl: string) {
+  const screenWidth = window.screen.availWidth || 1440;
+  const screenHeight = window.screen.availHeight || 900;
+  const halfWidth = Math.max(720, Math.floor(screenWidth / 2));
+  const appUrl = new URL(window.location.href);
+  appUrl.searchParams.set("job", jobId);
+
+  window.open(
+    sourceUrl,
+    "bilinote_source",
+    `popup=yes,left=0,top=0,width=${halfWidth},height=${screenHeight}`
+  );
+  window.open(
+    appUrl.toString(),
+    "bilinote_notes",
+    `popup=yes,left=${halfWidth},top=0,width=${screenWidth - halfWidth},height=${screenHeight}`
+  );
+}
+
+function withStartTime(url: string, seconds?: number): string {
+  if (!Number.isFinite(seconds)) {
+    return url;
+  }
+  const safeSeconds = Math.max(0, Math.floor(seconds ?? 0));
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.includes("youtube.com")) {
+      parsed.searchParams.set("start", String(safeSeconds));
+      parsed.searchParams.set("autoplay", "1");
+      return parsed.toString();
+    }
+    if (parsed.hostname.includes("bilibili.com")) {
+      parsed.searchParams.set("t", String(safeSeconds));
+      parsed.searchParams.set("autoplay", "1");
+      return parsed.toString();
+    }
+  } catch {
+    // Leave the embed URL untouched if parsing fails.
+  }
+  return url;
 }
 
 function timestampToSeconds(timestamp: string): number {
@@ -824,7 +1444,40 @@ function formatDate(value?: string) {
   }).format(new Date(value));
 }
 
-function formatStatus(status?: JobStatus) {
+function tabLabel(tab: DetailTab, language: AppLanguage): string {
+  if (language === "en") {
+    switch (tab) {
+      case "笔记":
+        return "Notes";
+      case "转录":
+        return "Transcript";
+      case "知识点":
+        return "Knowledge";
+    }
+  }
+  return tab;
+}
+
+function formatStatus(status?: JobStatus, language: AppLanguage = "zh") {
+  if (language === "en") {
+    switch (status) {
+      case "queued":
+        return "Queued";
+      case "extracting_audio":
+        return "Extracting audio";
+      case "transcribing":
+        return "Transcribing";
+      case "summarizing":
+        return "Summarizing";
+      case "done":
+        return "Done";
+      case "failed":
+        return "Failed";
+      default:
+        return "Not started";
+    }
+  }
+
   switch (status) {
     case "queued":
       return "排队中";

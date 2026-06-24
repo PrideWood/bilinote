@@ -24,6 +24,15 @@ export function isSupportedVideo(filename: string): boolean {
   return [".mp4", ".mov", ".mkv", ".webm"].includes(path.extname(filename).toLowerCase());
 }
 
+export function isDirectVideoUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return [".mp4", ".mov", ".mkv", ".webm"].includes(path.extname(parsed.pathname).toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 export async function extractAudio(videoPath: string, jobId: string): Promise<string> {
   await ensureStorageDirs();
   const audioPath = path.join(audioOutputDir, `${jobId}.wav`);
@@ -41,4 +50,52 @@ export async function extractAudio(videoPath: string, jobId: string): Promise<st
   ]);
 
   return audioPath;
+}
+
+export async function extractAudioFromUrl(
+  url: string,
+  jobId: string,
+  referer = "https://www.bilibili.com/"
+): Promise<string> {
+  await ensureStorageDirs();
+  const audioPath = path.join(audioOutputDir, `${jobId}.wav`);
+
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-headers",
+    `User-Agent: Mozilla/5.0\r\nReferer: ${referer}\r\n`,
+    "-i",
+    url,
+    "-vn",
+    "-ac",
+    "1",
+    "-ar",
+    "16000",
+    audioPath
+  ]);
+
+  return audioPath;
+}
+
+export async function downloadAudioFromOnlineVideo(url: string, jobId: string): Promise<string> {
+  await ensureStorageDirs();
+  const downloaderBin = process.env.ONLINE_VIDEO_DOWNLOADER_BIN_PATH || "yt-dlp";
+  const outputTemplate = path.join(audioOutputDir, `${jobId}.%(ext)s`);
+  const outputPath = path.join(audioOutputDir, `${jobId}.wav`);
+
+  await execFileAsync(downloaderBin, [
+    "--no-playlist",
+    "--extract-audio",
+    "--audio-format",
+    "wav",
+    "--audio-quality",
+    "0",
+    "--postprocessor-args",
+    "ffmpeg:-ac 1 -ar 16000",
+    "-o",
+    outputTemplate,
+    url
+  ]);
+
+  return outputPath;
 }
