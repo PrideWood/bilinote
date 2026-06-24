@@ -1,0 +1,8 @@
+node_modules
+dist
+server/dist
+.env
+.DS_Store
+uploads
+models
+bin
