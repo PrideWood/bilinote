@@ -156,11 +156,10 @@ const copy = {
     language: "界面语言",
     displayMode: "显示模式",
     speechModel: "语音转文字模型",
-    localTranscriptMode: "本地视频处理",
+    localTranscriptMode: "字幕选项",
     localAuto: "自动字幕优先",
     localWhisper: "强制 Whisper",
     localSubtitle: "使用字幕文件",
-    uploadSubtitle: "选择字幕文件",
     delete: "删除",
     deleteVideo: "删除视频",
     deleteConfirmTitle: "删除这条历史视频？",
@@ -229,11 +228,10 @@ const copy = {
     language: "Language",
     displayMode: "Appearance",
     speechModel: "Speech model",
-    localTranscriptMode: "Local video mode",
+    localTranscriptMode: "Subtitle options",
     localAuto: "Subtitles first",
     localWhisper: "Force Whisper",
     localSubtitle: "Use subtitle file",
-    uploadSubtitle: "Choose subtitle",
     delete: "Delete",
     deleteVideo: "Delete video",
     deleteConfirmTitle: "Delete this video?",
@@ -1503,7 +1501,7 @@ function DetailView({
         <div className="detail-title">
           <h1>{title}</h1>
           <p>
-            {formatDate(job?.createdAt)} · {formatDuration(lastTranscriptTime(transcript))} · {statusLabel}
+            {formatDate(job?.createdAt)} · {formatDuration(lastTranscriptTime(transcript))}
           </p>
         </div>
         {job?.result && (
@@ -2364,7 +2362,7 @@ function processingLabel(processing: ProcessingInfo, language: AppLanguage): str
       case "subtitle":
         return "Subtitles";
       case "whisper":
-        return processing.whisperModel ? `Whisper ${shortModelName(processing.whisperModel)}` : "Whisper";
+        return "Whisper";
       case "cache":
         return "Cache";
     }
@@ -2376,7 +2374,7 @@ function processingLabel(processing: ProcessingInfo, language: AppLanguage): str
     case "subtitle":
       return "字幕优先";
     case "whisper":
-      return processing.whisperModel ? `Whisper ${shortModelName(processing.whisperModel)}` : "Whisper 转写";
+      return "Whisper 转写";
     case "cache":
       return "缓存结果";
   }
@@ -2404,10 +2402,6 @@ function buildPageNumbers(currentPage: number, totalPages: number): Array<number
     result.push(page);
   }
   return result;
-}
-
-function shortModelName(modelPath: string): string {
-  return modelPath.split(/[\\/]/).pop()?.replace(/^ggml-/, "").replace(/\.bin$/, "") ?? modelPath;
 }
 
 function tabLabel(tab: DetailTab, language: AppLanguage): string {
