@@ -13,7 +13,8 @@
 │   └── local-video-knowledge-summary-requirements.md
 ├── server
 │   ├── bilibili.ts      # 早期 Bilibili 实验接口，暂保留
-│   ├── jobs.ts          # 内存任务状态
+│   ├── jobs.ts          # 任务状态与历史持久化
+│   ├── paths.ts         # app data、上传、模型和日志目录
 │   ├── server.ts        # Express API 路由
 │   ├── summarizer.ts    # DeepSeek / OpenAI-compatible 知识总结
 │   ├── transcriber.ts   # whisper.cpp 转写调用
@@ -24,6 +25,7 @@
 │   ├── main.tsx
 │   ├── styles.css
 │   └── vite-env.d.ts
+├── src-tauri            # 个人版 Tauri 桌面壳
 ├── .env.example
 ├── package.json
 ├── tsconfig.json
@@ -82,6 +84,58 @@ npm run dev
 
 前端默认运行在 [http://localhost:5173](http://localhost:5173)，如果端口被占用，Vite 会自动切到下一个端口。后端默认运行在 [http://localhost:3001](http://localhost:3001)。
 
+### 个人 Tauri 版
+
+Tauri 版目前面向自己使用：壳负责启动本地 Express 服务，窗口内加载同一套 React 前端。
+
+前置条件：
+
+```bash
+rustc --version
+cargo --version
+```
+
+本机未安装 Rust/Cargo 时，`npm run tauri:dev` 会停在 `cargo metadata`。
+
+安装 Rust 后运行：
+
+```bash
+npm run tauri:dev
+```
+
+打包：
+
+```bash
+npm run tauri:build
+```
+
+`tauri:dev` 和 `tauri:build` 会先运行：
+
+```bash
+npm run tauri:prepare-sidecars
+```
+
+该脚本会根据 Rust target triple 生成 Tauri 需要的 sidecar 文件，例如：
+
+```text
+src-tauri/sidecars/node-aarch64-apple-darwin
+src-tauri/sidecars/ffmpeg-aarch64-apple-darwin
+src-tauri/sidecars/yt-dlp-aarch64-apple-darwin
+src-tauri/sidecars/whisper-cli-aarch64-apple-darwin
+```
+
+可以用环境变量指定更适合分发的二进制：
+
+```bash
+TAURI_NODE_BIN=/path/to/node \
+TAURI_FFMPEG_BIN=/path/to/ffmpeg \
+TAURI_YT_DLP_BIN=/path/to/yt-dlp \
+TAURI_WHISPER_CLI_BIN=/path/to/whisper-cli \
+npm run tauri:build
+```
+
+注意：当前默认从本机 PATH / Homebrew 复制二进制，已经可以生成本机可运行的 `.app` / `.dmg`，但不等于跨机器完整分发。`node` / `ffmpeg` 可能链接 `/opt/homebrew` 动态库，`yt-dlp` 可能是 Homebrew Python wrapper。给别人安装前需要替换为 standalone/static 构建，或把相关 dylib / runtime 一起打包。
+
 ## 当前 MVP 范围
 
 - 支持上传本地视频文件，格式包括 `.mp4`、`.mov`、`.mkv`、`.webm`。
@@ -96,6 +150,7 @@ npm run dev
 - Transcript 会在后端合并为更自然的句段展示，同时保留原始片段用于 SRT 导出。
 - 支持导出 transcript 为 `.txt` 和 `.srt`。
 - 支持导出完整学习笔记为 `.md`，也可保存到 Obsidian vault。
+- 支持历史任务持久化、标题编辑、删除任务和模型选择/下载入口。
 
 ## 可用脚本
 
@@ -103,10 +158,13 @@ npm run dev
 npm run dev        # 同时启动 Vite 前端和 Express 后端
 npm run typecheck  # 前后端 TypeScript 类型检查
 npm run build      # 构建 server 和 client
+npm run tauri:dev  # 启动个人版 Tauri 桌面壳
+npm run tauri:build # 构建 Tauri 应用
+npm run tauri:prepare-sidecars # 生成当前平台的 Tauri sidecar 二进制
 ```
 
 ## 备注
 
 - `uploads/`、`models/`、`bin/` 已加入 `.gitignore`。
-- 任务历史会保存在 `uploads/jobs.json`，重启服务后仍可查看。
-- 下一步可以加入 whisper.cpp 下载脚本、模型检测页和完整视频转写验证。
+- 新版本会优先使用系统 app data 目录保存任务历史、上传文件、模型和日志；旧的项目内 `uploads/`、`models/` 会在首次启动时尽量迁移。
+- 下一步可以把当前 Homebrew sidecar 替换为官方 standalone/static 构建，并补签名、notarization 与自动更新。

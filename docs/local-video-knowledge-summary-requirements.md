@@ -8,7 +8,7 @@
 
 核心目标不是简单摘要，而是把知识视频中的概念、论证过程、知识点关系和复习材料结构化呈现。
 
-长期产品形态参考 ActivityWatch：本地应用启动本地服务，用户通过浏览器界面使用。应用内置或管理 `ffmpeg`、`yt-dlp`、`whisper-cli` 与 Whisper 模型，普通用户尽量只需要配置自己的 API Key。
+长期产品形态参考 ActivityWatch：本地应用启动本地服务，用户通过浏览器界面或轻量桌面壳使用。个人版优先采用 Tauri 壳启动本地 Express 服务并嵌入 React 前端；后续再考虑完整依赖内置、签名和分发。应用内置或管理 `ffmpeg`、`yt-dlp`、`whisper-cli` 与 Whisper 模型，普通用户尽量只需要配置自己的 API Key。
 
 ## 2. 目标用户
 
@@ -475,6 +475,8 @@ MVP 完成后应满足：
 - 总结失败时 transcript 仍可查看。
 - 任务历史重启后仍可查看。
 - 可导出 Markdown 学习笔记。
+- 个人 Tauri 版可以启动桌面窗口，并自动拉起本地服务。
+- 桌面窗口中的上传、转写、历史、导出、视频播放和模型选择功能与浏览器版一致。
 
 ## 14. 本地应用打包路线
 
@@ -493,21 +495,30 @@ MVP 完成后应满足：
    - Obsidian vault 路径配置。
    - 统一使用 app data 目录保存配置、模型、缓存和历史。
 
-3. **macOS 本地应用**
-   - 使用 Electron 壳启动本地 Node/Express server。
-   - 内置前端页面。
+3. **个人版 Tauri 壳**
+   - 使用 Tauri 启动本地 Node/Express server。
+   - Tauri WebView 加载 Vite/React 前端，前端 API 显式指向 `127.0.0.1:3001`。
+   - 开发期依赖本机 Rust/Cargo，并通过 sidecar 准备脚本收集 Node、`ffmpeg`、`yt-dlp`、`whisper-cli`。
+   - 构建期将 `dist/` 与 `dist-server/` 作为应用资源打包。
+   - 首版面向自己使用，已可生成本机 `.app` / `.dmg`。
+   - 从 Homebrew 拷贝出的 sidecar 只能视为本机可运行版本；正式分发前需要换成 standalone/static 二进制或补齐 dylib 依赖。
+   - 暂不处理签名、notarization 和自动更新。
+
+4. **可分发 macOS 本地应用**
+   - 继续使用 Tauri，或在确有必要时评估 Electron。
    - 内置或管理 `ffmpeg`、`yt-dlp`、`whisper-cli`。
    - Whisper 模型可选择内置小模型或首次启动下载。
    - 提供 Dock / 菜单栏入口，默认非开机自启，退出时关闭服务。
+   - 打包 Node runtime 或改造后端运行时，避免目标机器必须预装 Node。
 
-4. **跨平台扩展**
+5. **跨平台扩展**
    - macOS：`.dmg` / `.zip`。
    - Windows：`.exe` 安装包或 portable 版本。
    - Linux：`.AppImage` / `.deb`。
    - 根据平台选择对应二进制：`ffmpeg(.exe)`、`yt-dlp(.exe)`、`whisper-cli(.exe)`。
    - Whisper 模型文件跨平台复用。
 
-5. **后续产品化可选项**
+6. **后续产品化可选项**
    - 自动更新 `yt-dlp`。
    - 模型下载、校验和切换。
    - 任务并发控制和资源占用提示。

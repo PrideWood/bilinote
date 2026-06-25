@@ -2,6 +2,7 @@ import {
   type CSSProperties,
   type FormEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   useEffect,
   useMemo,
   useRef,
@@ -46,6 +47,13 @@ interface KnowledgeSummary {
   model: string;
 }
 
+interface ProcessingInfo {
+  transcriptSource: "manual" | "subtitle" | "whisper" | "cache";
+  label: string;
+  detail?: string;
+  whisperModel?: string;
+}
+
 interface JobRecord {
   id: string;
   status: JobStatus;
@@ -61,11 +69,13 @@ interface JobRecord {
       playbackUrl?: string;
       embedUrl?: string;
       storedPath?: string;
+      subtitlePath?: string;
       audioPath?: string;
     };
     transcript: TranscriptSegment[];
     originalTranscript?: TranscriptSegment[];
     summary?: KnowledgeSummary;
+    processing?: ProcessingInfo;
   };
 }
 
@@ -84,11 +94,37 @@ interface JobListItem {
       playbackUrl?: string;
       embedUrl?: string;
       storedPath?: string;
+      subtitlePath?: string;
       audioPath?: string;
     };
     transcriptCount: number;
     duration: number;
+    processing?: ProcessingInfo;
   };
+}
+
+interface WhisperModel {
+  id: string;
+  filename: string;
+  label: string;
+  size: string;
+  hint: string;
+  url: string;
+  modelPath: string;
+  installed: boolean;
+}
+
+interface ApiSettings {
+  provider: "openai" | "deepseek" | "compatible";
+  apiKey: string;
+  baseURL: string;
+  model: string;
+}
+
+const apiBaseUrl = "__TAURI_INTERNALS__" in window ? "http://127.0.0.1:3001" : "";
+
+function apiUrl(path: string) {
+  return `${apiBaseUrl}${path}`;
 }
 
 const detailTabs = ["笔记", "转录", "知识点"] as const;
@@ -96,12 +132,52 @@ type DetailTab = (typeof detailTabs)[number];
 type AppLanguage = "zh" | "en";
 type AppTheme = "light" | "dark";
 type ThemePreference = AppTheme | null;
+type LocalTranscriptMode = "auto" | "whisper" | "subtitle";
+
+interface YouTubePlayer {
+  destroy: () => void;
+  getCurrentTime: () => number;
+}
+
+declare global {
+  interface Window {
+    YT?: {
+      Player: new (
+        element: HTMLIFrameElement,
+        options?: {
+          events?: {
+            onReady?: () => void;
+            onStateChange?: () => void;
+          };
+        }
+      ) => YouTubePlayer;
+    };
+    onYouTubeIframeAPIReady?: () => void;
+  }
+}
 
 const copy = {
   zh: {
     settings: "设置",
     language: "界面语言",
     displayMode: "显示模式",
+    speechModel: "语音转文字模型",
+    localTranscriptMode: "本地视频处理",
+    localAuto: "自动字幕优先",
+    localWhisper: "强制 Whisper",
+    localSubtitle: "使用字幕文件",
+    uploadSubtitle: "选择字幕文件",
+    delete: "删除",
+    deleteVideo: "删除视频",
+    deleteConfirmTitle: "删除这条历史视频？",
+    deleteConfirmBody: "这会终止正在进行的任务，并删除已生成的转录、字幕、音频、缓存和笔记结果。",
+    installModelTitle: "安装语音转文字模型？",
+    installModelBody: "安装会下载模型文件到本地数据目录，下载期间请保持服务运行。",
+    confirm: "确认",
+    install: "安装",
+    installing: "安装中...",
+    notInstalled: "未安装",
+    transcriptSource: "处理方式",
     light: "浅色",
     dark: "深色",
     githubPending: "GitHub 仓库待添加",
@@ -122,6 +198,7 @@ const copy = {
     renameFailed: "重命名失败",
     save: "保存",
     cancel: "取消",
+    edit: "编辑",
     editTitle: "编辑标题",
     notes: "笔记",
     transcript: "转录",
@@ -131,7 +208,15 @@ const copy = {
     exportMd: "导出 MD 笔记",
     saveObsidian: "保存到 Obsidian",
     saving: "保存中...",
-    sideBySide: "并列学习",
+    sideBySide: "独立视频窗口",
+    apiSettings: "API 配置",
+    apiProvider: "服务商",
+    apiKey: "API Key",
+    apiBaseUrl: "Base URL",
+    apiModel: "模型名",
+    apiKeyPlaceholder: "留空则使用后端 .env",
+    apiBaseUrlPlaceholder: "例如 https://api.openai.com/v1",
+    apiModelPlaceholder: "例如 gpt-4.1-mini / deepseek-v4-flash",
     noPlayableVideo: "当前任务没有可播放的视频文件",
     noPlayableUrl: "当前任务没有可播放的视频地址",
     transcriptEmpty: "暂无 transcript",
@@ -149,6 +234,23 @@ const copy = {
     settings: "Settings",
     language: "Language",
     displayMode: "Appearance",
+    speechModel: "Speech model",
+    localTranscriptMode: "Local video mode",
+    localAuto: "Subtitles first",
+    localWhisper: "Force Whisper",
+    localSubtitle: "Use subtitle file",
+    uploadSubtitle: "Choose subtitle",
+    delete: "Delete",
+    deleteVideo: "Delete video",
+    deleteConfirmTitle: "Delete this video?",
+    deleteConfirmBody: "This will stop any running job and remove generated transcripts, subtitles, audio, cache, and notes.",
+    installModelTitle: "Install speech model?",
+    installModelBody: "The model file will be downloaded into the local app data directory. Keep the service running while it installs.",
+    confirm: "Confirm",
+    install: "Install",
+    installing: "Installing...",
+    notInstalled: "Not installed",
+    transcriptSource: "Processing",
     light: "Light",
     dark: "Dark",
     githubPending: "GitHub repository pending",
@@ -169,6 +271,7 @@ const copy = {
     renameFailed: "Rename failed",
     save: "Save",
     cancel: "Cancel",
+    edit: "Edit",
     editTitle: "Edit title",
     notes: "Notes",
     transcript: "Transcript",
@@ -178,7 +281,15 @@ const copy = {
     exportMd: "Export Markdown",
     saveObsidian: "Save to Obsidian",
     saving: "Saving...",
-    sideBySide: "Side by side",
+    sideBySide: "Standalone video window",
+    apiSettings: "API settings",
+    apiProvider: "Provider",
+    apiKey: "API Key",
+    apiBaseUrl: "Base URL",
+    apiModel: "Model",
+    apiKeyPlaceholder: "Blank uses backend .env",
+    apiBaseUrlPlaceholder: "e.g. https://api.openai.com/v1",
+    apiModelPlaceholder: "e.g. gpt-4.1-mini / deepseek-v4-flash",
     noPlayableVideo: "No playable video file for this job",
     noPlayableUrl: "No playable video URL for this job",
     transcriptEmpty: "No transcript yet",
@@ -195,6 +306,7 @@ const copy = {
 } as const;
 
 type CopyKey = keyof typeof copy.zh;
+const historyPageSize = 10;
 
 export default function App() {
   const [jobs, setJobs] = useState<JobListItem[]>([]);
@@ -206,9 +318,20 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [query, setQuery] = useState("");
   const [onlineUrl, setOnlineUrl] = useState("");
+  const [localTranscriptMode, setLocalTranscriptMode] = useState<LocalTranscriptMode>("auto");
+  const [localSubtitleFile, setLocalSubtitleFile] = useState<File | null>(null);
+  const [modelInfoOpen, setModelInfoOpen] = useState(false);
+  const [installCandidate, setInstallCandidate] = useState<WhisperModel | null>(null);
+  const [apiSettings, setApiSettings] = useState<ApiSettings>(() => loadStoredApiSettings());
+  const [playbackTime, setPlaybackTime] = useState(0);
   const [activeDetailTab, setActiveDetailTab] = useState<DetailTab>("转录");
   const [embedSeek, setEmbedSeek] = useState<{ seconds: number; nonce: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [whisperModels, setWhisperModels] = useState<WhisperModel[]>([]);
+  const [selectedWhisperModelPath, setSelectedWhisperModelPath] = useState(
+    () => window.localStorage.getItem("bilinote-whisper-model") ?? ""
+  );
+  const [installingModelId, setInstallingModelId] = useState("");
   const [language, setLanguage] = useState<AppLanguage>(
     () => (window.localStorage.getItem("bilinote-language") === "en" ? "en" : "zh")
   );
@@ -252,7 +375,7 @@ export default function App() {
     settingsCloseTimerRef.current = window.setTimeout(() => {
       setSettingsOpen(false);
       settingsCloseTimerRef.current = null;
-    }, 300);
+    }, 100);
   }
 
   useEffect(() => {
@@ -264,7 +387,16 @@ export default function App() {
   }, [language]);
 
   useEffect(() => {
+    window.localStorage.setItem("bilinote-whisper-model", selectedWhisperModelPath);
+  }, [selectedWhisperModelPath]);
+
+  useEffect(() => {
+    window.localStorage.setItem("bilinote-api-settings", JSON.stringify(apiSettings));
+  }, [apiSettings]);
+
+  useEffect(() => {
     void loadJobs();
+    void loadWhisperModels();
     const timer = window.setInterval(() => void loadJobs(), 2500);
     return () => window.clearInterval(timer);
   }, []);
@@ -278,7 +410,7 @@ export default function App() {
     let stopped = false;
     async function pollJob() {
       try {
-        const response = await fetch(`/api/jobs/${selectedJobId}`);
+        const response = await fetch(apiUrl(`/api/jobs/${selectedJobId}`));
         const payload = await response.json();
         if (!response.ok) {
           throw new Error(payload.error ?? "获取任务状态失败");
@@ -305,14 +437,94 @@ export default function App() {
   }, [selectedJobId]);
 
   async function loadJobs() {
-    const response = await fetch("/api/jobs");
-    const payload = await response.json();
-    if (response.ok) {
-      setJobs(payload);
+    try {
+      const response = await fetch(apiUrl("/api/jobs"));
+      const payload = await response.json();
+      if (response.ok) {
+        setJobs(payload);
+      }
+    } catch {
+      // The dev server can briefly restart while polling; keep the last known list.
     }
   }
 
-  async function handleVideoUpload(file: File | undefined) {
+  async function loadWhisperModels() {
+    try {
+      const response = await fetch(apiUrl("/api/whisper-models"));
+      const payload = await response.json();
+      if (response.ok) {
+        setWhisperModels(payload.models ?? []);
+        if (!selectedWhisperModelPath) {
+          const defaultModel = (payload.models ?? []).find((model: WhisperModel) => model.installed);
+          if (defaultModel) {
+            setSelectedWhisperModelPath(defaultModel.modelPath);
+          }
+        }
+      }
+    } catch {
+      // Model discovery is optional; transcription can still use .env defaults.
+    }
+  }
+
+  async function installWhisperModel(modelId: string) {
+    setInstallingModelId(modelId);
+    setError("");
+    try {
+      const response = await fetch(apiUrl("/api/whisper-models/install"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ id: modelId })
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error ?? "模型安装失败");
+      }
+      setWhisperModels(payload.models ?? []);
+      if (payload.modelPath) {
+        setSelectedWhisperModelPath(payload.modelPath);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "模型安装失败");
+    } finally {
+      setInstallingModelId("");
+    }
+  }
+
+  function requestWhisperModel(modelId: string) {
+    const model = whisperModels.find((item) => item.id === modelId);
+    if (!model) {
+      return;
+    }
+    if (!model.installed) {
+      setInstallCandidate(model);
+      return;
+    }
+    setSelectedWhisperModelPath(model.modelPath);
+  }
+
+  async function confirmInstallWhisperModel() {
+    if (!installCandidate) {
+      return;
+    }
+    await installWhisperModel(installCandidate.id);
+    setInstallCandidate(null);
+  }
+
+  async function deleteJob(jobId: string) {
+    const response = await fetch(apiUrl(`/api/jobs/${jobId}`), { method: "DELETE" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error ?? "删除任务失败");
+    }
+    if (selectedJobId === jobId) {
+      closeJob();
+    }
+    await loadJobs();
+  }
+
+  async function handleVideoUpload(file: File | undefined, subtitleFile?: File | null) {
     if (!file) {
       return;
     }
@@ -322,10 +534,16 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append("video", file);
+      if (subtitleFile) {
+        formData.append("subtitle", subtitleFile);
+      }
       formData.append("manualTranscript", "");
+      formData.append("localTranscriptMode", localTranscriptMode);
+      formData.append("whisperModelPath", selectedWhisperModelPath);
+      formData.append("apiConfig", JSON.stringify(buildApiConfigPayload(apiSettings)));
       formData.append("notes", "");
 
-      const response = await fetch("/api/jobs", {
+      const response = await fetch(apiUrl("/api/jobs"), {
         method: "POST",
         body: formData
       });
@@ -337,6 +555,7 @@ export default function App() {
       setActiveDetailTab("转录");
       setSelectedJobId(payload.jobId);
       setJobQueryParam(payload.jobId);
+      setLocalSubtitleFile(null);
       void loadJobs();
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建任务失败");
@@ -356,13 +575,15 @@ export default function App() {
     setSubmitting(true);
 
     try {
-      const response = await fetch("/api/jobs/url", {
+      const response = await fetch(apiUrl("/api/jobs/url"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
           url,
+          whisperModelPath: selectedWhisperModelPath,
+          apiConfig: buildApiConfigPayload(apiSettings),
           notes: ""
         })
       });
@@ -407,6 +628,7 @@ export default function App() {
   function openJob(id: string) {
     setError("");
     setEmbedSeek(null);
+    setPlaybackTime(0);
     setActiveDetailTab("转录");
     setSelectedJobId(id);
     setJobQueryParam(id);
@@ -423,6 +645,7 @@ export default function App() {
       return;
     }
     if (!player) {
+      setPlaybackTime(Math.max(0, seconds));
       setEmbedSeek((current) => ({
         seconds: Math.max(0, seconds),
         nonce: (current?.nonce ?? 0) + 1
@@ -430,6 +653,7 @@ export default function App() {
       return;
     }
     player.currentTime = Math.max(0, seconds);
+    setPlaybackTime(Math.max(0, seconds));
     void player.play().catch(() => {
       // Browser autoplay rules can block play; seeking still succeeds.
     });
@@ -473,7 +697,7 @@ export default function App() {
                     onFocus={cancelSettingsClose}
                     onBlur={scheduleSettingsClose}
                   >
-                    <div className="setting-row">
+                    <div className="setting-row compact-setting-row">
                       <span>{t("language")}</span>
                       <div className="segmented-control">
                         <button
@@ -492,7 +716,7 @@ export default function App() {
                         </button>
                       </div>
                     </div>
-                    <div className="setting-row">
+                    <div className="setting-row compact-setting-row">
                       <span>{t("displayMode")}</span>
                       <div className="segmented-control">
                         <button
@@ -510,6 +734,101 @@ export default function App() {
                           {t("dark")}
                         </button>
                       </div>
+                    </div>
+                    <div className="setting-row compact-setting-row model-setting-row">
+                      <span className="setting-label-with-info">
+                        {t("speechModel")}
+                        <button
+                          aria-label="模型说明"
+                          className="model-info-button"
+                          onBlur={() => setModelInfoOpen(false)}
+                          onClick={() => setModelInfoOpen((value) => !value)}
+                          onFocus={() => setModelInfoOpen(true)}
+                          type="button"
+                        >
+                          <InfoIcon />
+                        </button>
+                      </span>
+                      <div className="model-select-wrap">
+                        <select
+                          disabled={installingModelId.length > 0}
+                          onChange={(event) => requestWhisperModel(event.target.value)}
+                          value={
+                            whisperModels.find((model) => model.modelPath === selectedWhisperModelPath)?.id ?? ""
+                          }
+                        >
+                          <option value="" disabled>
+                            {t("speechModel")}
+                          </option>
+                          {whisperModels.map((model) => (
+                            <option key={model.id} value={model.id}>
+                              {model.label} · {model.size} · {model.installed ? modelInstalledLabel(language) : t("notInstalled")}
+                            </option>
+                          ))}
+                        </select>
+                        {modelInfoOpen && (
+                          <div className="model-info-popover">
+                            {whisperModels.map((model) => (
+                              <p key={model.id}>
+                                <strong>{model.label}</strong>
+                                <span>{model.size} · {model.hint}</span>
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="settings-divider" />
+                    <div className="api-settings-block">
+                      <strong>{t("apiSettings")}</strong>
+                      <label>
+                        <span>{t("apiProvider")}</span>
+                        <select
+                          value={apiSettings.provider}
+                          onChange={(event) =>
+                            setApiSettings((current) => ({
+                              ...current,
+                              provider: event.target.value as ApiSettings["provider"]
+                            }))
+                          }
+                        >
+                          <option value="openai">OpenAI</option>
+                          <option value="deepseek">DeepSeek</option>
+                          <option value="compatible">兼容接口</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>{t("apiKey")}</span>
+                        <input
+                          autoComplete="off"
+                          onChange={(event) =>
+                            setApiSettings((current) => ({ ...current, apiKey: event.target.value }))
+                          }
+                          placeholder={t("apiKeyPlaceholder")}
+                          type="password"
+                          value={apiSettings.apiKey}
+                        />
+                      </label>
+                      <label>
+                        <span>{t("apiBaseUrl")}</span>
+                        <input
+                          onChange={(event) =>
+                            setApiSettings((current) => ({ ...current, baseURL: event.target.value }))
+                          }
+                          placeholder={t("apiBaseUrlPlaceholder")}
+                          value={apiSettings.baseURL}
+                        />
+                      </label>
+                      <label>
+                        <span>{t("apiModel")}</span>
+                        <input
+                          onChange={(event) =>
+                            setApiSettings((current) => ({ ...current, model: event.target.value }))
+                          }
+                          placeholder={t("apiModelPlaceholder")}
+                          value={apiSettings.model}
+                        />
+                      </label>
                     </div>
                   </div>
                 )}
@@ -543,6 +862,8 @@ export default function App() {
             statusLabel={statusLabel}
             summary={summary}
             transcript={transcript}
+            playbackTime={playbackTime}
+            onPlaybackTimeChange={setPlaybackTime}
             videoRef={videoRef}
             t={t}
             language={language}
@@ -556,12 +877,28 @@ export default function App() {
             onJobUpdate={setSelectedJob}
             onReloadJobs={loadJobs}
             onOpenJob={openJob}
+            onDeleteJob={deleteJob}
             onSubmitOnlineVideo={handleOnlineVideoSubmit}
             onUploadVideo={handleVideoUpload}
+            localTranscriptMode={localTranscriptMode}
+            localSubtitleFile={localSubtitleFile}
+            onChangeLocalTranscriptMode={setLocalTranscriptMode}
+            onChangeLocalSubtitleFile={setLocalSubtitleFile}
             query={query}
             submitting={submitting}
             t={t}
             language={language}
+          />
+        )}
+        {installCandidate && (
+          <ConfirmDialog
+            body={`${t("installModelBody")} ${installCandidate.label} (${installCandidate.size})`}
+            cancelLabel={t("cancel")}
+            confirmLabel={installingModelId === installCandidate.id ? t("installing") : t("install")}
+            disabled={installingModelId.length > 0}
+            onCancel={() => setInstallCandidate(null)}
+            onConfirm={() => void confirmInstallWhisperModel()}
+            title={t("installModelTitle")}
           />
         )}
       </section>
@@ -577,8 +914,13 @@ function HomeView({
   onJobUpdate,
   onReloadJobs,
   onOpenJob,
+  onDeleteJob,
   onSubmitOnlineVideo,
   onUploadVideo,
+  localTranscriptMode,
+  localSubtitleFile,
+  onChangeLocalTranscriptMode,
+  onChangeLocalSubtitleFile,
   query,
   submitting,
   t,
@@ -591,8 +933,13 @@ function HomeView({
   onJobUpdate: (job: JobRecord) => void;
   onReloadJobs: () => Promise<void>;
   onOpenJob: (id: string) => void;
+  onDeleteJob: (id: string) => Promise<void>;
   onSubmitOnlineVideo: (event: FormEvent<HTMLFormElement>) => Promise<void>;
-  onUploadVideo: (file: File | undefined) => Promise<void>;
+  onUploadVideo: (file: File | undefined, subtitleFile?: File | null) => Promise<void>;
+  localTranscriptMode: LocalTranscriptMode;
+  localSubtitleFile: File | null;
+  onChangeLocalTranscriptMode: (value: LocalTranscriptMode) => void;
+  onChangeLocalSubtitleFile: (file: File | null) => void;
   query: string;
   submitting: boolean;
   t: (key: CopyKey) => string;
@@ -602,6 +949,21 @@ function HomeView({
   const [draftTitle, setDraftTitle] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<JobListItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [subtitleOptionsOpen, setSubtitleOptionsOpen] = useState(false);
+  const [historyPage, setHistoryPage] = useState(1);
+  const subtitleInputRef = useRef<HTMLInputElement | null>(null);
+  const totalPages = Math.max(1, Math.ceil(jobs.length / historyPageSize));
+  const visibleJobs = jobs.slice((historyPage - 1) * historyPageSize, historyPage * historyPageSize);
+
+  useEffect(() => {
+    setHistoryPage(1);
+  }, [query]);
+
+  useEffect(() => {
+    setHistoryPage((page) => Math.min(Math.max(1, page), totalPages));
+  }, [totalPages]);
 
   async function saveTitle(jobId: string) {
     const title = draftTitle.trim();
@@ -613,7 +975,7 @@ function HomeView({
     setRenaming(true);
     setRenameError("");
     try {
-      const response = await fetch(`/api/jobs/${jobId}/title`, {
+      const response = await fetch(apiUrl(`/api/jobs/${jobId}/title`), {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json"
@@ -633,6 +995,22 @@ function HomeView({
       setRenameError(err instanceof Error ? err.message : t("renameFailed"));
     } finally {
       setRenaming(false);
+    }
+  }
+
+  async function confirmDeleteJob() {
+    if (!deleteTarget) {
+      return;
+    }
+    setDeleting(true);
+    setRenameError("");
+    try {
+      await onDeleteJob(deleteTarget.id);
+      setDeleteTarget(null);
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : t("deleteVideo"));
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -661,13 +1039,65 @@ function HomeView({
               disabled={submitting}
               type="file"
               onChange={(event) => {
-                void onUploadVideo(event.target.files?.[0]);
+                void onUploadVideo(event.target.files?.[0], localSubtitleFile);
                 event.currentTarget.value = "";
               }}
             />
             {t("uploadVideo")}
           </label>
+          <button
+            aria-label={t("localTranscriptMode")}
+            className={`caption-toggle ${subtitleOptionsOpen ? "active" : ""}`}
+            onClick={() => setSubtitleOptionsOpen((value) => !value)}
+            title={t("localTranscriptMode")}
+            type="button"
+          >
+            <ClosedCaptionIcon />
+          </button>
         </div>
+        {subtitleOptionsOpen && (
+          <div className="local-mode-panel">
+            <input
+              accept=".srt,.vtt,text/vtt,application/x-subrip"
+              disabled={submitting}
+              ref={subtitleInputRef}
+              type="file"
+              onChange={(event) => {
+                const file = event.target.files?.[0] ?? null;
+                onChangeLocalSubtitleFile(file);
+                if (file) {
+                  onChangeLocalTranscriptMode("subtitle");
+                }
+              }}
+            />
+            <div className="segmented-control local-mode-control">
+              <button
+                className={localTranscriptMode === "auto" ? "active" : ""}
+                onClick={() => onChangeLocalTranscriptMode("auto")}
+                type="button"
+              >
+                {t("localAuto")}
+              </button>
+              <button
+                className={localTranscriptMode === "whisper" ? "active" : ""}
+                onClick={() => onChangeLocalTranscriptMode("whisper")}
+                type="button"
+              >
+                {t("localWhisper")}
+              </button>
+              <button
+                className={localTranscriptMode === "subtitle" ? "active" : ""}
+                onClick={() => {
+                  onChangeLocalTranscriptMode("subtitle");
+                  subtitleInputRef.current?.click();
+                }}
+                type="button"
+              >
+                {localSubtitleFile?.name ?? t("localSubtitle")}
+              </button>
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="history-section">
@@ -686,8 +1116,10 @@ function HomeView({
         <div className="history-table">
         <div className="table-head">
           <span>{t("video")}</span>
+          <span>{t("speechModel")}</span>
           <span>{t("createdAt")}</span>
           <span>{t("status")}</span>
+          <span aria-label={t("delete")} />
         </div>
         {renameError && <div className="notice error history-error">{renameError}</div>}
         {jobs.length === 0 ? (
@@ -696,7 +1128,7 @@ function HomeView({
             <p>{t("noHistoryBody")}</p>
           </div>
         ) : (
-          jobs.map((job) => {
+          visibleJobs.map((job) => {
             const title = job.result?.video.originalName ?? t("emptyTitle");
             const isEditing = editingJobId === job.id;
 
@@ -721,7 +1153,7 @@ function HomeView({
               <span className="item-cell">
                 <span className="thumbnail">
                   {job.result?.video.storedPath ? (
-                    <video muted preload="metadata" src={`/api/jobs/${job.id}/video`} />
+                    <video muted preload="metadata" src={apiUrl(`/api/jobs/${job.id}/video`)} />
                   ) : job.result?.video.sourceUrl ? (
                     <span>URL</span>
                   ) : (
@@ -792,17 +1224,128 @@ function HomeView({
                   </small>
                 </span>
               </span>
+              <span className="history-model-cell">
+                {job.result?.processing ? (
+                  <span className={`source-badge ${job.result.processing.transcriptSource}`}>
+                    {processingLabel(job.result.processing, language)}
+                  </span>
+                ) : (
+                  <span className="muted">--</span>
+                )}
+              </span>
               <span>{formatDate(job.createdAt)}</span>
               <span className="history-status-cell">
                 <span>{formatStatus(job.status, language)}{job.status !== "done" ? ` ${job.progress}%` : ""}</span>
+              </span>
+              <span className="history-actions-cell">
+                <button
+                  aria-label={t("deleteVideo")}
+                  className="delete-job-button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setDeleteTarget(job);
+                  }}
+                  title={t("deleteVideo")}
+                  type="button"
+                >
+                  <TrashIcon />
+                </button>
               </span>
             </div>
             );
           })
         )}
         </div>
+        {jobs.length > historyPageSize && (
+          <HistoryPagination
+            currentPage={historyPage}
+            language={language}
+            onChangePage={setHistoryPage}
+            pageSize={historyPageSize}
+            totalItems={jobs.length}
+            totalPages={totalPages}
+          />
+        )}
       </section>
+      {deleteTarget && (
+        <ConfirmDialog
+          body={t("deleteConfirmBody")}
+          cancelLabel={t("cancel")}
+          confirmLabel={deleting ? t("processing") : t("delete")}
+          disabled={deleting}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => void confirmDeleteJob()}
+          title={t("deleteConfirmTitle")}
+        />
+      )}
     </section>
+  );
+}
+
+function HistoryPagination({
+  currentPage,
+  language,
+  onChangePage,
+  pageSize,
+  totalItems,
+  totalPages
+}: {
+  currentPage: number;
+  language: AppLanguage;
+  onChangePage: (page: number) => void;
+  pageSize: number;
+  totalItems: number;
+  totalPages: number;
+}) {
+  const pages = buildPageNumbers(currentPage, totalPages);
+  const start = (currentPage - 1) * pageSize + 1;
+  const end = Math.min(currentPage * pageSize, totalItems);
+  const previousLabel = language === "zh" ? "前页" : "Prev";
+  const nextLabel = language === "zh" ? "后页" : "Next";
+  const totalLabel = language === "zh" ? `共${totalItems}条` : `${totalItems} total`;
+  const rangeLabel = language === "zh" ? `${start}-${end}` : `${start}-${end}`;
+
+  return (
+    <nav className="history-pagination" aria-label={language === "zh" ? "历史分页" : "History pagination"}>
+      <button
+        className="pagination-step"
+        disabled={currentPage <= 1}
+        onClick={() => onChangePage(currentPage - 1)}
+        type="button"
+      >
+        &lt;{previousLabel}
+      </button>
+      <span className="pagination-pages">
+        {pages.map((page, index) =>
+          page === "ellipsis" ? (
+            <span className="pagination-ellipsis" key={`ellipsis-${index}`}>
+              ...
+            </span>
+          ) : (
+            <button
+              aria-current={page === currentPage ? "page" : undefined}
+              className={page === currentPage ? "active" : ""}
+              key={page}
+              onClick={() => onChangePage(page)}
+              type="button"
+            >
+              {page}
+            </button>
+          )
+        )}
+      </span>
+      <button
+        className="pagination-step"
+        disabled={currentPage >= totalPages}
+        onClick={() => onChangePage(currentPage + 1)}
+        type="button"
+      >
+        {nextLabel}&gt;
+      </button>
+      <span className="pagination-count">
+        {rangeLabel} / {totalLabel}
+      </span>
+    </nav>
   );
 }
 
@@ -818,6 +1361,8 @@ function DetailView({
   statusLabel,
   summary,
   transcript,
+  playbackTime,
+  onPlaybackTimeChange,
   videoRef,
   t,
   language
@@ -833,6 +1378,8 @@ function DetailView({
   statusLabel: string;
   summary?: KnowledgeSummary;
   transcript: TranscriptSegment[];
+  playbackTime: number;
+  onPlaybackTimeChange: (seconds: number) => void;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   t: (key: CopyKey) => string;
   language: AppLanguage;
@@ -847,8 +1394,29 @@ function DetailView({
   const [videoWidth, setVideoWidth] = useState(57);
   const [draftTranscript, setDraftTranscript] = useState<TranscriptSegment[]>(transcript);
   const detailGridRef = useRef<HTMLDivElement | null>(null);
+  const exportCloseTimerRef = useRef<number | null>(null);
   const sourceUrl = job?.result?.video.sourceUrl;
   const jobId = job?.id;
+  const currentSegment = findCurrentSegment(transcript, playbackTime);
+
+  function cancelExportClose() {
+    if (exportCloseTimerRef.current !== null) {
+      window.clearTimeout(exportCloseTimerRef.current);
+      exportCloseTimerRef.current = null;
+    }
+  }
+
+  function scheduleExportClose() {
+    cancelExportClose();
+    exportCloseTimerRef.current = window.setTimeout(() => {
+      setExportOpen(false);
+      exportCloseTimerRef.current = null;
+    }, 100);
+  }
+
+  useEffect(() => {
+    return () => cancelExportClose();
+  }, []);
 
   useEffect(() => {
     if (!editing) {
@@ -862,7 +1430,7 @@ function DetailView({
     }
     setSaving(true);
     try {
-      const response = await fetch(`/api/jobs/${job.id}/transcript`, {
+      const response = await fetch(apiUrl(`/api/jobs/${job.id}/transcript`), {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json"
@@ -890,7 +1458,7 @@ function DetailView({
     setSavingNote(true);
     setNoteMessage("");
     try {
-      const response = await fetch(`/api/jobs/${job.id}/save-obsidian`, {
+      const response = await fetch(apiUrl(`/api/jobs/${job.id}/save-obsidian`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -945,19 +1513,28 @@ function DetailView({
           </p>
         </div>
         {job?.result && (
-          <div className="export-menu">
+          <div
+            className="export-menu"
+            onMouseEnter={cancelExportClose}
+            onMouseLeave={scheduleExportClose}
+          >
             <button
               aria-label="导出"
-              onClick={() => setExportOpen((value) => !value)}
+              onBlur={scheduleExportClose}
+              onClick={() => {
+                cancelExportClose();
+                setExportOpen(true);
+              }}
+              onFocus={cancelExportClose}
               type="button"
             >
               ⋮
             </button>
             {exportOpen && (
               <div className="export-dropdown">
-                <a href={`/api/jobs/${job.id}/transcript.txt`}>{t("exportTxt")}</a>
-                <a href={`/api/jobs/${job.id}/transcript.srt`}>{t("exportSrt")}</a>
-                <a href={`/api/jobs/${job.id}/notes.md`}>{t("exportMd")}</a>
+                <a href={apiUrl(`/api/jobs/${job.id}/transcript.txt`)}>{t("exportTxt")}</a>
+                <a href={apiUrl(`/api/jobs/${job.id}/transcript.srt`)}>{t("exportSrt")}</a>
+                <a href={apiUrl(`/api/jobs/${job.id}/notes.md`)}>{t("exportMd")}</a>
                 <button disabled={savingNote} onClick={() => void saveNotesToObsidian()} type="button">
                   {savingNote ? t("saving") : t("saveObsidian")}
                 </button>
@@ -977,7 +1554,13 @@ function DetailView({
       >
         <section className="video-column">
           {hasPlayableVideo ? (
-            <OnlinePlayer embedSeek={embedSeek} job={job} videoRef={videoRef} t={t} />
+            <OnlinePlayer
+              embedSeek={embedSeek}
+              job={job}
+              onTimeUpdate={onPlaybackTimeChange}
+              videoRef={videoRef}
+              t={t}
+            />
           ) : (
             <div className="video-placeholder">
               {job?.status === "done" ? t("noPlayableVideo") : `${statusLabel} ${job?.progress ?? 0}%`}
@@ -986,13 +1569,20 @@ function DetailView({
           <div className="video-meta-panel">
             <span>{formatDuration(lastTranscriptTime(transcript))}</span>
             <span>{transcript.length} 段转录</span>
-            <span>{statusLabel}</span>
+            <span className={`source-badge ${job?.result?.processing?.transcriptSource ?? "unknown"}`}>
+              {job?.result?.processing
+                ? processingLabel(job.result.processing, language)
+                : language === "en"
+                  ? "Unmarked"
+                  : "未标记"}
+            </span>
             {jobId && sourceUrl && (
               <button onClick={() => openSideBySide(jobId, sourceUrl)} type="button">
                 {t("sideBySide")}
               </button>
             )}
           </div>
+          <CurrentCaptionPanel segment={currentSegment} />
         </section>
 
         <div
@@ -1054,8 +1644,10 @@ function DetailView({
                     disabled={transcript.length === 0}
                     onClick={() => setEditing(true)}
                     type="button"
+                    title={t("edit")}
                   >
-                    {t("editTitle")}
+                    <SquarePenIcon />
+                    <span>{t("edit")}</span>
                   </button>
                 )
               )}
@@ -1068,6 +1660,7 @@ function DetailView({
               onChangeDraft={setDraftTranscript}
               onSeek={onSeek}
               query={textQuery}
+              activeSegment={currentSegment}
               transcript={editing ? draftTranscript : transcript}
               t={t}
             />
@@ -1085,31 +1678,114 @@ function DetailView({
 function OnlinePlayer({
   embedSeek,
   job,
+  onTimeUpdate,
   videoRef,
   t
 }: {
   embedSeek: { seconds: number; nonce: number } | null;
   job: JobRecord | null;
+  onTimeUpdate: (seconds: number) => void;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   t: (key: CopyKey) => string;
 }) {
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const youtubePlayerRef = useRef<YouTubePlayer | null>(null);
   const video = job?.result?.video;
-  const localVideoUrl = job?.id && video?.storedPath ? `/api/jobs/${job.id}/video` : undefined;
+  const localVideoUrl = job?.id && video?.storedPath ? apiUrl(`/api/jobs/${job.id}/video`) : undefined;
   const directVideoUrl = localVideoUrl ?? video?.playbackUrl;
+  const embedUrl = video?.embedUrl ? withStartTime(video.embedUrl, embedSeek?.seconds) : undefined;
+
+  useEffect(() => {
+    if (!embedUrl?.includes("youtube.com")) {
+      return;
+    }
+
+    let disposed = false;
+    let timer: number | undefined;
+    let fallbackTimer: number | undefined;
+
+    function readCurrentTime() {
+      try {
+        const currentTime = youtubePlayerRef.current?.getCurrentTime();
+        if (typeof currentTime === "number" && Number.isFinite(currentTime)) {
+          onTimeUpdate(currentTime);
+        }
+      } catch {
+        // The iframe can briefly be unavailable during reloads/seeks.
+      }
+    }
+
+    function handleMessage(event: MessageEvent) {
+      if (event.source !== iframeRef.current?.contentWindow) {
+        return;
+      }
+      const data = typeof event.data === "string" ? safeParseJson(event.data) : event.data;
+      const currentTime = data?.info?.currentTime;
+      if (data?.event === "infoDelivery" && typeof currentTime === "number") {
+        onTimeUpdate(currentTime);
+      }
+    }
+
+    void loadYouTubeIframeApi().then(() => {
+      if (disposed || !iframeRef.current || !window.YT?.Player) {
+        return;
+      }
+      youtubePlayerRef.current?.destroy();
+      youtubePlayerRef.current = new window.YT.Player(iframeRef.current, {
+        events: {
+          onReady: () => {
+            readCurrentTime();
+            timer = window.setInterval(readCurrentTime, 500);
+          },
+          onStateChange: readCurrentTime
+        }
+      });
+    });
+
+    fallbackTimer = window.setInterval(() => {
+      iframeRef.current?.contentWindow?.postMessage(
+        JSON.stringify({ event: "command", func: "getCurrentTime", args: [] }),
+        "*"
+      );
+    }, 600);
+
+    window.addEventListener("message", handleMessage);
+    return () => {
+      disposed = true;
+      if (timer) {
+        window.clearInterval(timer);
+      }
+      if (fallbackTimer) {
+        window.clearInterval(fallbackTimer);
+      }
+      youtubePlayerRef.current?.destroy();
+      youtubePlayerRef.current = null;
+      window.removeEventListener("message", handleMessage);
+    };
+  }, [embedUrl, onTimeUpdate]);
 
   if (directVideoUrl) {
-    return <video controls preload="metadata" ref={videoRef} src={directVideoUrl} />;
+    return (
+      <video
+        controls
+        onTimeUpdate={(event) => onTimeUpdate(event.currentTarget.currentTime)}
+        preload="metadata"
+        ref={videoRef}
+        src={directVideoUrl}
+      />
+    );
   }
 
-  if (video?.embedUrl) {
+  if (embedUrl) {
     return (
       <iframe
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
         allowFullScreen
         className="video-embed"
-        key={`${job?.id ?? "online"}-${embedSeek?.nonce ?? 0}`}
-        src={withStartTime(video.embedUrl, embedSeek?.seconds)}
-        title={video.originalName}
+        key={`${job?.id ?? "online"}-${embedSeek?.nonce ?? 0}-${embedUrl}`}
+        ref={iframeRef}
+        src={embedUrl}
+        title={video?.originalName ?? "online video"}
       />
     );
   }
@@ -1117,11 +1793,96 @@ function OnlinePlayer({
   return <div className="video-placeholder">{t("noPlayableUrl")}</div>;
 }
 
+function CurrentCaptionPanel({ segment }: { segment?: TranscriptSegment }) {
+  return (
+    <div className="current-caption-panel">
+      <p>{segment ? formatTranscriptDisplayText(segment.text) : ""}</p>
+    </div>
+  );
+}
+
+function ConfirmDialog({
+  body,
+  cancelLabel,
+  confirmLabel,
+  disabled,
+  onCancel,
+  onConfirm,
+  title
+}: {
+  body: string;
+  cancelLabel: string;
+  confirmLabel: string;
+  disabled?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  title: string;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div aria-modal="true" className="confirm-dialog" role="dialog">
+        <h2>{title}</h2>
+        <p>{body}</p>
+        <div className="confirm-actions">
+          <button className="ghost-button" disabled={disabled} onClick={onCancel} type="button">
+            {cancelLabel}
+          </button>
+          <button className="danger-button" disabled={disabled} onClick={onConfirm} type="button">
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="M19 6l-1 14H6L5 6" />
+      <path d="M10 11v5" />
+      <path d="M14 11v5" />
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5" />
+      <path d="M12 8h.01" />
+    </svg>
+  );
+}
+
+function ClosedCaptionIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <rect height="14" rx="2" width="18" x="3" y="5" />
+      <path d="M10 10.5a2.5 2.5 0 1 0 0 3" />
+      <path d="M17 10.5a2.5 2.5 0 1 0 0 3" />
+    </svg>
+  );
+}
+
+function SquarePenIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
 function TranscriptPane({
   editing,
   onChangeDraft,
   onSeek,
   query,
+  activeSegment,
   transcript,
   t
 }: {
@@ -1129,18 +1890,35 @@ function TranscriptPane({
   onChangeDraft: (segments: TranscriptSegment[]) => void;
   onSeek: (seconds: number) => void;
   query: string;
+  activeSegment?: TranscriptSegment;
   transcript: TranscriptSegment[];
   t: (key: CopyKey) => string;
 }) {
+  const activeLineRef = useRef<HTMLElement | null>(null);
+  const keyword = query.trim();
+  const activeKey = activeSegment ? segmentKey(activeSegment) : "";
+
+  useEffect(() => {
+    if (editing || keyword || !activeKey) {
+      return;
+    }
+    activeLineRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [activeKey, editing, keyword]);
+
   if (transcript.length === 0) {
     return <div className="empty-state compact-empty">{t("transcriptEmpty")}</div>;
   }
 
-  const keyword = query.trim().toLowerCase();
-  const visibleTranscript = keyword
+  const normalizedKeyword = keyword.toLowerCase();
+  const visibleTranscript = normalizedKeyword
     ? transcript.filter(
-        (item) =>
-          item.text.toLowerCase().includes(keyword) || item.timestamp.toLowerCase().includes(keyword)
+        (item) => {
+          const displayText = formatTranscriptDisplayText(item.text).toLowerCase();
+          return (
+            displayText.includes(normalizedKeyword) ||
+            item.timestamp.toLowerCase().includes(normalizedKeyword)
+          );
+        }
       )
     : transcript;
 
@@ -1153,9 +1931,14 @@ function TranscriptPane({
           const originalIndex = transcript.findIndex(
             (segment) => segment.start === item.start && segment.timestamp === item.timestamp
           );
+          const isActive = activeKey === segmentKey(item);
 
           return editing ? (
-            <div className="minute-line editing-line" key={`${item.timestamp}-${item.start}`}>
+            <div
+              className={`minute-line editing-line ${isActive ? "active-line" : ""}`}
+              key={`${item.timestamp}-${item.start}`}
+              ref={isActive ? (node) => { activeLineRef.current = node; } : undefined}
+            >
               <button onClick={() => onSeek(item.start)} type="button">
                 {item.timestamp}
               </button>
@@ -1173,14 +1956,17 @@ function TranscriptPane({
             </div>
           ) : (
             <button
-              className="minute-line"
+              className={`minute-line ${isActive ? "active-line" : ""}`}
               key={`${item.timestamp}-${item.start}`}
               onClick={() => onSeek(item.start)}
+              ref={isActive ? (node) => { activeLineRef.current = node; } : undefined}
               type="button"
             >
               <time>{item.timestamp}</time>
               <span className="line-content">
-                <span className="line-text">{item.text}</span>
+                <span className="line-text">
+                  {highlightQuery(formatTranscriptDisplayText(item.text), keyword)}
+                </span>
               </span>
             </button>
           );
@@ -1318,6 +2104,36 @@ function getStoredThemePreference(): ThemePreference {
   return value === "light" || value === "dark" ? value : null;
 }
 
+function loadStoredApiSettings(): ApiSettings {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem("bilinote-api-settings") ?? "{}") as Partial<ApiSettings>;
+    return {
+      provider:
+        parsed.provider === "deepseek" || parsed.provider === "compatible" || parsed.provider === "openai"
+          ? parsed.provider
+          : "openai",
+      apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey : "",
+      baseURL: typeof parsed.baseURL === "string" ? parsed.baseURL : "",
+      model: typeof parsed.model === "string" ? parsed.model : ""
+    };
+  } catch {
+    return { provider: "openai", apiKey: "", baseURL: "", model: "" };
+  }
+}
+
+function buildApiConfigPayload(settings: ApiSettings) {
+  return {
+    provider: settings.provider,
+    apiKey: settings.apiKey.trim(),
+    baseURL: settings.baseURL.trim(),
+    model: settings.model.trim()
+  };
+}
+
+function modelInstalledLabel(language: AppLanguage) {
+  return language === "en" ? "Installed" : "已安装";
+}
+
 function getSystemTheme(): AppTheme {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
@@ -1342,26 +2158,73 @@ function openSideBySide(jobId: string, sourceUrl: string) {
 }
 
 function withStartTime(url: string, seconds?: number): string {
-  if (!Number.isFinite(seconds)) {
-    return url;
-  }
-  const safeSeconds = Math.max(0, Math.floor(seconds ?? 0));
   try {
     const parsed = new URL(url);
     if (parsed.hostname.includes("youtube.com")) {
-      parsed.searchParams.set("start", String(safeSeconds));
-      parsed.searchParams.set("autoplay", "1");
+      parsed.searchParams.set("enablejsapi", "1");
+      parsed.searchParams.set("origin", window.location.origin);
+      if (Number.isFinite(seconds)) {
+        parsed.searchParams.set("start", String(Math.max(0, Math.floor(seconds ?? 0))));
+        parsed.searchParams.set("autoplay", "1");
+      }
       return parsed.toString();
     }
     if (parsed.hostname.includes("bilibili.com")) {
-      parsed.searchParams.set("t", String(safeSeconds));
-      parsed.searchParams.set("autoplay", "1");
+      if (Number.isFinite(seconds)) {
+        parsed.searchParams.set("t", String(Math.max(0, Math.floor(seconds ?? 0))));
+        parsed.searchParams.set("autoplay", "1");
+      }
       return parsed.toString();
     }
   } catch {
     // Leave the embed URL untouched if parsing fails.
   }
   return url;
+}
+
+function safeParseJson(value: string): any {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
+let youtubeApiPromise: Promise<void> | undefined;
+
+function loadYouTubeIframeApi(): Promise<void> {
+  if (window.YT?.Player) {
+    return Promise.resolve();
+  }
+  if (youtubeApiPromise) {
+    return youtubeApiPromise;
+  }
+
+  youtubeApiPromise = new Promise((resolve, reject) => {
+    const previousReady = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      previousReady?.();
+      resolve();
+    };
+
+    const existingScript = document.querySelector<HTMLScriptElement>(
+      'script[src="https://www.youtube.com/iframe_api"]'
+    );
+    if (existingScript) {
+      existingScript.addEventListener("error", () => reject(new Error("YouTube API 加载失败")), {
+        once: true
+      });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = "https://www.youtube.com/iframe_api";
+    script.async = true;
+    script.onerror = () => reject(new Error("YouTube API 加载失败"));
+    document.head.appendChild(script);
+  });
+
+  return youtubeApiPromise;
 }
 
 function timestampToSeconds(timestamp: string): number {
@@ -1403,6 +2266,61 @@ function findBestSegment(text: string, transcript: TranscriptSegment[]): Transcr
   return best && best.score >= 0.16 ? best.segment : undefined;
 }
 
+function findCurrentSegment(transcript: TranscriptSegment[], seconds: number): TranscriptSegment | undefined {
+  if (transcript.length === 0 || !Number.isFinite(seconds)) {
+    return undefined;
+  }
+  return transcript.find((segment, index) => {
+    const next = transcript[index + 1];
+    const end = segment.end ?? next?.start ?? segment.start + 4;
+    return seconds >= segment.start && seconds < end;
+  });
+}
+
+function segmentKey(segment: TranscriptSegment): string {
+  return `${segment.timestamp}-${segment.start}`;
+}
+
+function highlightQuery(text: string, query: string) {
+  const keyword = query.trim();
+  if (!keyword) {
+    return text;
+  }
+
+  const lowerText = text.toLowerCase();
+  const lowerKeyword = keyword.toLowerCase();
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  let index = lowerText.indexOf(lowerKeyword);
+
+  while (index >= 0) {
+    if (index > cursor) {
+      parts.push(text.slice(cursor, index));
+    }
+    const match = text.slice(index, index + keyword.length);
+    parts.push(
+      <mark className="search-highlight" key={`${index}-${match}`}>
+        {match}
+      </mark>
+    );
+    cursor = index + keyword.length;
+    index = lowerText.indexOf(lowerKeyword, cursor);
+  }
+
+  if (cursor < text.length) {
+    parts.push(text.slice(cursor));
+  }
+  return parts;
+}
+
+function formatTranscriptDisplayText(text: string): string {
+  return text
+    .replace(/([A-Za-z0-9][.!?])(?=[A-Z])/g, "$1 ")
+    .replace(/([.!?])(?=(?:I|You|He|She|It|We|They|The|This|That|There|Then|And|But|So|Now|If|When|What|Why|How)\b)/g, "$1 ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function tokenize(text: string): string[] {
   const normalized = text.toLowerCase().replace(/[^\p{Letter}\p{Number}]+/gu, "");
   const cjk = normalized.match(/[\u4e00-\u9fff]/gu) ?? [];
@@ -1442,6 +2360,60 @@ function formatDate(value?: string) {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function processingLabel(processing: ProcessingInfo, language: AppLanguage): string {
+  if (language === "en") {
+    switch (processing.transcriptSource) {
+      case "manual":
+        return "Manual transcript";
+      case "subtitle":
+        return "Subtitles";
+      case "whisper":
+        return processing.whisperModel ? `Whisper ${shortModelName(processing.whisperModel)}` : "Whisper";
+      case "cache":
+        return "Cache";
+    }
+  }
+
+  switch (processing.transcriptSource) {
+    case "manual":
+      return "手动 transcript";
+    case "subtitle":
+      return "字幕优先";
+    case "whisper":
+      return processing.whisperModel ? `Whisper ${shortModelName(processing.whisperModel)}` : "Whisper 转写";
+    case "cache":
+      return "缓存结果";
+  }
+}
+
+function buildPageNumbers(currentPage: number, totalPages: number): Array<number | "ellipsis"> {
+  if (totalPages <= 10) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
+  }
+
+  const pages = new Set<number>([1, totalPages]);
+  for (let page = currentPage - 2; page <= currentPage + 2; page += 1) {
+    if (page > 1 && page < totalPages) {
+      pages.add(page);
+    }
+  }
+
+  const sorted = [...pages].sort((left, right) => left - right);
+  const result: Array<number | "ellipsis"> = [];
+  for (const page of sorted) {
+    const previous = result[result.length - 1];
+    if (typeof previous === "number" && page - previous > 1) {
+      result.push("ellipsis");
+    }
+    result.push(page);
+  }
+  return result;
+}
+
+function shortModelName(modelPath: string): string {
+  return modelPath.split(/[\\/]/).pop()?.replace(/^ggml-/, "").replace(/\.bin$/, "") ?? modelPath;
 }
 
 function tabLabel(tab: DetailTab, language: AppLanguage): string {

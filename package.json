@@ -6,10 +6,16 @@
   "scripts": {
     "dev": "concurrently \"npm:dev:server\" \"npm:dev:client\"",
     "dev:client": "vite --host 0.0.0.0 --strictPort",
+    "dev:client:local": "vite --host 127.0.0.1 --strictPort",
     "dev:server": "tsx watch server/server.ts",
+    "start:local": "NODE_ENV=production node dist-server/server.js",
     "build": "npm run build:server && npm run build:client",
     "build:client": "vite build",
     "build:server": "tsc -p server/tsconfig.json",
+    "tauri": "tauri",
+    "tauri:dev": "npm run tauri:prepare-sidecars && tauri dev",
+    "tauri:prepare-sidecars": "node scripts/prepare-tauri-sidecars.mjs",
+    "tauri:build": "npm run tauri:prepare-sidecars && tauri build",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p server/tsconfig.json"
   },
   "dependencies": {
@@ -25,6 +31,8 @@
     "vite": "latest"
   },
   "devDependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/cli": "^2.11.3",
     "@types/cors": "latest",
     "@types/express": "latest",
     "@types/node": "latest",
