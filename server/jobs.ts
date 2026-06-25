@@ -40,6 +40,8 @@ export interface KnowledgeSummary {
   model: string;
 }
 
+export type TranscriptSource = "manual" | "subtitle" | "whisper" | "cache";
+
 export interface JobResult {
   video: {
     originalName: string;
@@ -47,11 +49,18 @@ export interface JobResult {
     playbackUrl?: string;
     embedUrl?: string;
     storedPath?: string;
+    subtitlePath?: string;
     audioPath?: string;
   };
   transcript: TranscriptSegment[];
   originalTranscript?: TranscriptSegment[];
   summary?: KnowledgeSummary;
+  processing?: {
+    transcriptSource: TranscriptSource;
+    label: string;
+    detail?: string;
+    whisperModel?: string;
+  };
 }
 
 export interface JobRecord {
@@ -107,6 +116,14 @@ export function updateJob(id: string, patch: Partial<JobRecord>): JobRecord {
   jobs.set(id, updated);
   persistJobs();
   return updated;
+}
+
+export function deleteJob(id: string): boolean {
+  const deleted = jobs.delete(id);
+  if (deleted) {
+    persistJobs();
+  }
+  return deleted;
 }
 
 function loadPersistedJobs(): Map<string, JobRecord> {
