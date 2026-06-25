@@ -3,11 +3,9 @@ import { createHash } from "node:crypto";
 import dotenv from "dotenv";
 import express from "express";
 import multer from "multer";
-import { createReadStream, createWriteStream, existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import {
   buildTranscript,
   fetchBilibiliAudioUrl,
@@ -18,11 +16,9 @@ import {
 } from "./bilibili.js";
 import {
   createJob,
-  deleteJob,
   getJob,
   listJobs,
   updateJob,
-  type JobResult,
   type JobRecord,
   type KnowledgeSummary,
   type TranscriptSegment
@@ -30,12 +26,10 @@ import {
 import {
   correctTranscriptSegments,
   summarizeKnowledgeTranscript,
-  summarizeTranscript,
-  type ClientApiConfig
+  summarizeTranscript
 } from "./summarizer.js";
 import {
   mergeTranscriptSegments,
-  parseSubtitleText,
   parsePlainTranscript,
   segmentsToSrt,
   segmentsToTxt,
@@ -45,45 +39,19 @@ import {
 import {
   ensureStorageDirs,
   downloadAudioFromOnlineVideo,
-  downloadSubtitleFromOnlineVideo,
-  audioOutputDir,
   extractAudio,
-  extractEmbeddedSubtitle,
   extractAudioFromUrl,
   isDirectVideoUrl,
-  isSupportedSubtitle,
   isSupportedVideo,
   processedCacheDir,
-  subtitleOutputDir,
-  transcriptOutputDir,
   videoUploadDir
 } from "./video.js";
-import { appDataDir, defaultWhisperModelPath, logsDir, whisperModelsDir } from "./paths.js";
 
 dotenv.config();
 
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
 const maxUploadMb = Number(process.env.MAX_UPLOAD_MB || 2048);
-const activeJobControllers = new Map<string, AbortController>();
-const pendingJobFiles = new Map<string, string[]>();
-
-const whisperModelCandidates = [
-  { id: "tiny", filename: "ggml-tiny.bin", label: "Tiny", size: "75 MB", hint: "最快，适合短测试或清晰人声；准确率最低，CPU 也能轻松运行" },
-  { id: "base", filename: "ggml-base.bin", label: "Base", size: "142 MB", hint: "轻量，适合普通短视频粗略笔记；资源占用很低" },
-  { id: "small", filename: "ggml-small.bin", label: "Small", size: "466 MB", hint: "速度和准确率均衡；适合大多数清晰课程/访谈" },
-  { id: "medium", filename: "ggml-medium.bin", label: "Medium", size: "1.5 GB", hint: "更稳，适合口音或嘈杂内容；转写速度明显更慢" },
-  {
-    id: "large-v3-turbo",
-    filename: "ggml-large-v3-turbo.bin",
-    label: "Large v3 Turbo",
-    size: "1.5 GB",
-    hint: "默认高准确率，资源占用更高；适合质量要求高或复杂音频"
-  }
-].map((model) => ({
-  ...model,
-  url: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${model.filename}`
-}));
 
 await ensureStorageDirs();
 
@@ -98,49 +66,7 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, appDataDir, logsDir });
-});
-
-app.get("/api/whisper-models", async (_req, res) => {
-  res.json({
-    defaultModelPath: defaultWhisperModelPath,
-    modelsDir: whisperModelsDir,
-    models: await listWhisperModels()
-  });
-});
-
-app.post("/api/whisper-models/install", async (req, res) => {
-  try {
-    const id = String(req.body?.id ?? "").trim();
-    const candidate = whisperModelCandidates.find((model) => model.id === id);
-    if (!candidate) {
-      return res.status(400).json({ error: "未知的 Whisper 模型" });
-    }
-
-    await mkdir(whisperModelsDir, { recursive: true });
-    const modelPath = path.join(whisperModelsDir, candidate.filename);
-    try {
-      const existing = await stat(modelPath);
-      if (existing.size > 0) {
-        return res.json({ ok: true, modelPath, models: await listWhisperModels() });
-      }
-    } catch {
-      // Download below.
-    }
-
-    const response = await fetch(candidate.url);
-    if (!response.ok) {
-      throw new Error(`模型下载失败：HTTP ${response.status}`);
-    }
-    if (!response.body) {
-      throw new Error("模型下载失败：响应体为空");
-    }
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(modelPath));
-    return res.json({ ok: true, modelPath, models: await listWhisperModels() });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "模型安装失败";
-    return res.status(500).json({ error: message });
-  }
+  res.json({ ok: true });
 });
 
 app.get("/api/jobs", (_req, res) => {
@@ -157,56 +83,31 @@ app.get("/api/jobs", (_req, res) => {
         ? {
             video: job.result.video,
             transcriptCount: job.result.transcript.length,
-            duration: estimateDuration(job.result.transcript),
-            processing: job.result.processing
+            duration: estimateDuration(job.result.transcript)
           }
         : null
     }))
   );
 });
 
-app.post("/api/jobs", upload.fields([{ name: "video", maxCount: 1 }, { name: "subtitle", maxCount: 1 }]), async (req, res) => {
+app.post("/api/jobs", upload.single("video"), async (req, res) => {
   try {
-    const files = req.files as { video?: Express.Multer.File[]; subtitle?: Express.Multer.File[] } | undefined;
-    const videoFile = files?.video?.[0];
-    const subtitleFile = files?.subtitle?.[0];
     const manualTranscript = String(req.body?.manualTranscript ?? "").trim();
-    if (!videoFile && !manualTranscript && !subtitleFile) {
+    if (!req.file && !manualTranscript) {
       return res.status(400).json({ error: "请上传视频文件或粘贴 transcript" });
     }
 
-    if (videoFile && !isSupportedVideo(videoFile.originalname)) {
+    if (req.file && !isSupportedVideo(req.file.originalname)) {
       return res.status(400).json({ error: "暂只支持 mp4、mov、mkv、webm 视频文件" });
     }
 
-    if (subtitleFile && !isSupportedSubtitle(subtitleFile.originalname)) {
-      return res.status(400).json({ error: "暂只支持 srt、vtt 字幕文件" });
-    }
-
     const job = createJob("任务已加入队列");
-    const controller = new AbortController();
-    activeJobControllers.set(job.id, controller);
-    pendingJobFiles.set(
-      job.id,
-      [videoFile?.path, subtitleFile?.path].filter((filePath): filePath is string => Boolean(filePath))
-    );
     res.json({ jobId: job.id, status: job.status });
 
-    void processLocalVideoJob(
-      job.id,
-      {
-        file: videoFile,
-        subtitleFile,
-        manualTranscript,
-        localTranscriptMode: normalizeLocalTranscriptMode(String(req.body?.localTranscriptMode ?? "")),
-        whisperModelPath: String(req.body?.whisperModelPath ?? "").trim(),
-        apiConfig: parseClientApiConfig(req.body?.apiConfig),
-        notes: String(req.body?.notes ?? "").trim()
-      },
-      controller.signal
-    ).finally(() => {
-      activeJobControllers.delete(job.id);
-      pendingJobFiles.delete(job.id);
+    void processLocalVideoJob(job.id, {
+      file: req.file,
+      manualTranscript,
+      notes: String(req.body?.notes ?? "").trim()
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "创建任务失败";
@@ -227,22 +128,11 @@ app.post("/api/jobs/url", async (req, res) => {
     }
 
     const job = createJob("在线视频任务已加入队列");
-    const controller = new AbortController();
-    activeJobControllers.set(job.id, controller);
     res.json({ jobId: job.id, status: job.status });
 
-    void processOnlineVideoJob(
-      job.id,
-      {
-        url: parsedUrl.toString(),
-        whisperModelPath: String(req.body?.whisperModelPath ?? "").trim(),
-        apiConfig: parseClientApiConfig(req.body?.apiConfig),
-        notes: String(req.body?.notes ?? "").trim()
-      },
-      controller.signal
-    ).finally(() => {
-      activeJobControllers.delete(job.id);
-      pendingJobFiles.delete(job.id);
+    void processOnlineVideoJob(job.id, {
+      url: parsedUrl.toString(),
+      notes: String(req.body?.notes ?? "").trim()
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "创建任务失败";
@@ -256,24 +146,6 @@ app.get("/api/jobs/:jobId", (req, res) => {
     return res.status(404).json({ error: "任务不存在" });
   }
   return res.json(job);
-});
-
-app.delete("/api/jobs/:jobId", async (req, res) => {
-  try {
-    const job = getJob(req.params.jobId);
-    if (!job) {
-      return res.status(404).json({ error: "任务不存在" });
-    }
-
-    activeJobControllers.get(job.id)?.abort();
-    activeJobControllers.delete(job.id);
-    await cleanupGeneratedJobFiles(job);
-    deleteJob(job.id);
-    return res.json({ ok: true });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "删除任务失败";
-    return res.status(500).json({ error: message });
-  }
 });
 
 app.patch("/api/jobs/:jobId/title", (req, res) => {
@@ -480,51 +352,29 @@ app.post("/api/summarize", async (req, res) => {
   }
 });
 
-const clientDistDir = path.resolve(process.env.CLIENT_DIST_DIR || "dist");
-const clientIndexPath = path.join(clientDistDir, "index.html");
-if (process.env.NODE_ENV === "production" && existsSync(clientIndexPath)) {
-  app.use(express.static(clientDistDir, { index: false }));
-  app.get(/^\/(?!api\/).*/, (_req, res) => {
-    res.sendFile(clientIndexPath);
-  });
-}
-
 app.listen(port, () => {
   console.log(`BiliNote AI server listening on http://localhost:${port}`);
-  console.log(`BiliNote AI data directory: ${appDataDir}`);
 });
 
 async function processLocalVideoJob(
   jobId: string,
   input: {
     file?: Express.Multer.File;
-    subtitleFile?: Express.Multer.File;
     manualTranscript: string;
-    localTranscriptMode: "auto" | "whisper" | "subtitle";
-    whisperModelPath: string;
-    apiConfig?: ClientApiConfig;
     notes: string;
-  },
-  signal: AbortSignal
+  }
 ) {
   const originalName = input.file ? normalizeUploadFilename(input.file.originalname) : "手动 transcript";
   const storedPath = input.file?.path;
-  const subtitlePath = input.subtitleFile?.path;
   let audioPath: string | undefined;
   let videoHash: string | undefined;
-  const whisperModelPath = await resolveWhisperModelPath(input.whisperModelPath);
 
   try {
-    throwIfAborted(signal);
     let originalTranscript = parsePlainTranscript(input.manualTranscript);
-    let transcriptSource: "manual" | "subtitle" | "whisper" | "cache" =
-      originalTranscript.length > 0 ? "manual" : "whisper";
-    let processingDetail: string | undefined;
 
     if (input.file && originalTranscript.length === 0) {
       videoHash = await hashFile(input.file.path);
-      const canReuseCache = input.localTranscriptMode === "auto" && !input.subtitleFile;
-      const cached = canReuseCache ? await readProcessedVideoCache(videoHash) : undefined;
+      const cached = await readProcessedVideoCache(videoHash);
       if (cached) {
         updateJob(jobId, {
           status: "done",
@@ -537,58 +387,25 @@ async function processLocalVideoJob(
             },
             originalTranscript: cached.originalTranscript,
             transcript: cached.transcript,
-            summary: cached.summary,
-            processing: cached.processing ?? {
-              transcriptSource: "cache",
-              label: "缓存结果",
-              detail: "复用同一视频文件的历史处理结果"
-            }
+            summary: cached.summary
           }
         });
         return;
       }
 
-      if (input.localTranscriptMode !== "whisper") {
-        updateJob(jobId, {
-          status: "transcribing",
-          progress: 24,
-          message: input.subtitleFile ? "正在读取上传的字幕文件" : "正在检测本地视频内封字幕"
-        });
+      updateJob(jobId, {
+        status: "extracting_audio",
+        progress: 20,
+        message: "正在提取音频"
+      });
+      audioPath = await extractAudio(input.file.path, jobId);
 
-        const subtitleTranscript = await fetchLocalSubtitleTranscript(input.file, input.subtitleFile, jobId, signal);
-        if (subtitleTranscript) {
-          originalTranscript = subtitleTranscript.transcript;
-          transcriptSource = "subtitle";
-          processingDetail = subtitleTranscript.detail;
-        } else if (input.localTranscriptMode === "subtitle") {
-          throw new Error("未读取到可用字幕，请确认字幕文件格式或改用 Whisper 转写。");
-        }
-      }
-
-      if (originalTranscript.length === 0) {
-        transcriptSource = "whisper";
-
-        updateJob(jobId, {
-          status: "extracting_audio",
-          progress: 35,
-          message:
-            input.localTranscriptMode === "whisper"
-              ? "已按设置跳过字幕，正在提取音频"
-              : "未检测到可用字幕，正在提取音频"
-        });
-        audioPath = await extractAudio(input.file.path, jobId, { signal });
-
-        updateJob(jobId, {
-          status: "transcribing",
-          progress: 45,
-          message: `正在使用本地 Whisper 转写${whisperModelPath ? `（${path.basename(whisperModelPath)}）` : ""}`
-        });
-        originalTranscript = await transcribeAudio(audioPath, jobId, { modelPath: whisperModelPath, signal });
-        processingDetail =
-          input.localTranscriptMode === "whisper"
-            ? "用户选择跳过字幕，直接使用 whisper.cpp 转写"
-            : "未找到可用本地字幕，已回退为音轨转写";
-      }
+      updateJob(jobId, {
+        status: "transcribing",
+        progress: 45,
+        message: "正在使用本地 Whisper 转写"
+      });
+      originalTranscript = await transcribeAudio(audioPath, jobId);
     }
 
     if (originalTranscript.length === 0) {
@@ -605,9 +422,7 @@ async function processLocalVideoJob(
 
     transcript = await correctTranscriptSegments({
       title: originalName,
-      segments: transcript,
-      signal,
-      apiConfig: input.apiConfig
+      segments: transcript
     });
 
     updateJob(jobId, {
@@ -620,38 +435,18 @@ async function processLocalVideoJob(
     const summary = await summarizeKnowledgeTranscript({
       title: originalName,
       transcript: transcriptText,
-      userNotes: input.notes,
-      signal,
-      apiConfig: input.apiConfig
+      userNotes: input.notes
     });
 
     const result = {
       video: {
         originalName,
         storedPath: storedPath ? path.resolve(storedPath) : undefined,
-        subtitlePath: subtitlePath ? path.resolve(subtitlePath) : undefined,
         audioPath: audioPath ? path.resolve(audioPath) : undefined
       },
       originalTranscript,
       transcript,
-      summary,
-      processing: {
-        transcriptSource,
-        label:
-          transcriptSource === "manual"
-            ? "手动 transcript"
-            : transcriptSource === "subtitle"
-              ? "本地字幕"
-              : "本地 Whisper 转写",
-        detail:
-          processingDetail ??
-          (transcriptSource === "manual"
-            ? "使用用户粘贴的 transcript，跳过音频转写"
-            : transcriptSource === "subtitle"
-              ? "使用本地字幕，跳过音频转写"
-              : "从视频音轨提取音频后使用 whisper.cpp 转写"),
-        whisperModel: transcriptSource === "whisper" ? whisperModelPath : undefined
-      }
+      summary
     };
 
     updateJob(jobId, {
@@ -665,30 +460,10 @@ async function processLocalVideoJob(
       await writeProcessedVideoCache(videoHash, {
         originalTranscript,
         transcript,
-        summary,
-        processing: {
-          transcriptSource,
-          label:
-            transcriptSource === "manual"
-              ? "手动 transcript"
-              : transcriptSource === "subtitle"
-                ? "本地字幕"
-                : "本地 Whisper 转写",
-          detail:
-            processingDetail ??
-            (transcriptSource === "manual"
-              ? "使用用户粘贴的 transcript，跳过音频转写"
-              : transcriptSource === "subtitle"
-                ? "使用本地字幕，跳过音频转写"
-                : "从视频音轨提取音频后使用 whisper.cpp 转写"),
-          whisperModel: transcriptSource === "whisper" ? whisperModelPath : undefined
-        }
+        summary
       });
     }
   } catch (error) {
-    if (!getJob(jobId)) {
-      return;
-    }
     updateJob(jobId, {
       status: "failed",
       progress: 100,
@@ -698,7 +473,6 @@ async function processLocalVideoJob(
         video: {
           originalName,
           storedPath: storedPath ? path.resolve(storedPath) : undefined,
-          subtitlePath: subtitlePath ? path.resolve(subtitlePath) : undefined,
           audioPath: audioPath ? path.resolve(audioPath) : undefined
         },
         originalTranscript: input.manualTranscript ? parsePlainTranscript(input.manualTranscript) : [],
@@ -714,53 +488,34 @@ async function processOnlineVideoJob(
   jobId: string,
   input: {
     url: string;
-    whisperModelPath: string;
-    apiConfig?: ClientApiConfig;
     notes: string;
-  },
-  signal: AbortSignal
+  }
 ) {
   const metadata = await resolveOnlineVideoMetadata(input.url);
   let audioPath: string | undefined;
-  const whisperModelPath = await resolveWhisperModelPath(input.whisperModelPath);
 
   try {
-    throwIfAborted(signal);
     updateJob(jobId, {
-      status: "transcribing",
+      status: "extracting_audio",
       progress: 18,
-      message: "正在优先检测在线视频字幕"
+      message: "正在读取在线视频音频"
     });
 
-    const subtitleTranscript = await fetchOnlineSubtitleTranscript(input.url, jobId, metadata.title, signal);
-    let originalTranscript = subtitleTranscript?.transcript ?? [];
-    let transcriptSource: "subtitle" | "whisper" = subtitleTranscript ? "subtitle" : "whisper";
-
-    if (originalTranscript.length === 0) {
-      updateJob(jobId, {
-        status: "extracting_audio",
-        progress: 24,
-        message: "正在读取在线视频音频"
-      });
-
-      if (metadata.audioUrl) {
-        audioPath = await extractAudioFromUrl(metadata.audioUrl, jobId, metadata.pageUrl ?? input.url, { signal });
-      } else if (isDirectVideoUrl(input.url)) {
-        audioPath = await extractAudioFromUrl(input.url, jobId, undefined, { signal });
-      } else {
-        audioPath = await downloadAudioFromOnlineVideo(input.url, jobId, { signal });
-      }
-
-      updateJob(jobId, {
-        status: "transcribing",
-        progress: 45,
-        message: `正在使用本地 Whisper 转写在线视频音频${whisperModelPath ? `（${path.basename(whisperModelPath)}）` : ""}`
-      });
-
-      originalTranscript = await transcribeAudio(audioPath, jobId, { modelPath: whisperModelPath, signal });
-      transcriptSource = "whisper";
+    if (metadata.audioUrl) {
+      audioPath = await extractAudioFromUrl(metadata.audioUrl, jobId, metadata.pageUrl ?? input.url);
+    } else if (isDirectVideoUrl(input.url)) {
+      audioPath = await extractAudioFromUrl(input.url, jobId);
+    } else {
+      audioPath = await downloadAudioFromOnlineVideo(input.url, jobId);
     }
 
+    updateJob(jobId, {
+      status: "transcribing",
+      progress: 45,
+      message: "正在使用本地 Whisper 转写在线视频音频"
+    });
+
+    const originalTranscript = await transcribeAudio(audioPath, jobId);
     if (originalTranscript.length === 0) {
       throw new Error("未获得 transcript，请检查该在线视频是否包含可读取音轨。");
     }
@@ -775,9 +530,7 @@ async function processOnlineVideoJob(
 
     transcript = await correctTranscriptSegments({
       title: metadata.title,
-      segments: transcript,
-      signal,
-      apiConfig: input.apiConfig
+      segments: transcript
     });
 
     updateJob(jobId, {
@@ -790,9 +543,7 @@ async function processOnlineVideoJob(
     const summary = await summarizeKnowledgeTranscript({
       title: metadata.title,
       transcript: transcriptText,
-      userNotes: input.notes,
-      signal,
-      apiConfig: input.apiConfig
+      userNotes: input.notes
     });
 
     updateJob(jobId, {
@@ -805,26 +556,14 @@ async function processOnlineVideoJob(
           sourceUrl: input.url,
           playbackUrl: metadata.playbackUrl,
           embedUrl: metadata.embedUrl,
-          audioPath: audioPath ? path.resolve(audioPath) : undefined
+          audioPath: path.resolve(audioPath)
         },
         originalTranscript,
         transcript,
-        summary,
-        processing: {
-          transcriptSource,
-          label: transcriptSource === "subtitle" ? "在线视频字幕" : "本地 Whisper 转写",
-          detail:
-            transcriptSource === "subtitle"
-              ? `优先使用可提取字幕${subtitleTranscript?.source ? `：${subtitleTranscript.source}` : ""}`
-              : "未找到可用字幕，已回退为音轨转写",
-          whisperModel: transcriptSource === "whisper" ? whisperModelPath : undefined
-        }
+        summary
       }
     });
   } catch (error) {
-    if (!getJob(jobId)) {
-      return;
-    }
     updateJob(jobId, {
       status: "failed",
       progress: 100,
@@ -977,7 +716,6 @@ interface ProcessedVideoCache {
   originalTranscript: TranscriptSegment[];
   transcript: TranscriptSegment[];
   summary?: Awaited<ReturnType<typeof summarizeKnowledgeTranscript>>;
-  processing?: JobResult["processing"];
 }
 
 interface OnlineVideoMetadata {
@@ -1029,227 +767,6 @@ async function writeProcessedVideoCache(hash: string, cache: ProcessedVideoCache
 
 function processedVideoCachePath(hash: string) {
   return path.join(processedCacheDir, `${hash}.json`);
-}
-
-function throwIfAborted(signal: AbortSignal) {
-  if (signal.aborted) {
-    throw new Error("任务已取消");
-  }
-}
-
-async function cleanupGeneratedJobFiles(job: JobRecord) {
-  const knownPaths = new Set<string>();
-  for (const filePath of pendingJobFiles.get(job.id) ?? []) {
-    knownPaths.add(filePath);
-  }
-  const video = job.result?.video;
-  if (video?.storedPath) {
-    knownPaths.add(video.storedPath);
-  }
-  if (video?.audioPath) {
-    knownPaths.add(video.audioPath);
-  }
-  if (video?.subtitlePath) {
-    knownPaths.add(video.subtitlePath);
-  }
-
-  for (const dir of [audioOutputDir, transcriptOutputDir, subtitleOutputDir]) {
-    try {
-      const files = await readdir(dir);
-      for (const filename of files) {
-        if (filename.startsWith(`${job.id}.`)) {
-          knownPaths.add(path.join(dir, filename));
-        }
-      }
-    } catch {
-      // Missing directories do not need cleanup.
-    }
-  }
-
-  if (video?.storedPath) {
-    try {
-      const hash = await hashFile(video.storedPath);
-      knownPaths.add(processedVideoCachePath(hash));
-    } catch {
-      // The uploaded file may already be gone.
-    }
-  }
-
-  await Promise.all([...knownPaths].map((filePath) => safeRemove(filePath)));
-  pendingJobFiles.delete(job.id);
-}
-
-async function safeRemove(filePath: string) {
-  const resolved = path.resolve(filePath);
-  const allowedRoots = [path.resolve(videoUploadDir), audioOutputDir, transcriptOutputDir, subtitleOutputDir, processedCacheDir];
-  if (!allowedRoots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`))) {
-    return;
-  }
-
-  await rm(resolved, { force: true, recursive: true });
-}
-
-function normalizeLocalTranscriptMode(value: string): "auto" | "whisper" | "subtitle" {
-  if (value === "whisper" || value === "subtitle") {
-    return value;
-  }
-  return "auto";
-}
-
-function parseClientApiConfig(value: unknown): ClientApiConfig | undefined {
-  const parsed = typeof value === "string" ? safeJsonParse(value) : value;
-  if (!parsed || typeof parsed !== "object") {
-    return undefined;
-  }
-  const record = parsed as Record<string, unknown>;
-  const apiKey = typeof record.apiKey === "string" ? record.apiKey.trim() : "";
-  if (!apiKey) {
-    return undefined;
-  }
-  const provider = record.provider === "deepseek" || record.provider === "compatible" ? record.provider : "openai";
-  return {
-    provider,
-    apiKey,
-    baseURL: typeof record.baseURL === "string" ? record.baseURL.trim() : undefined,
-    model: typeof record.model === "string" ? record.model.trim() : undefined
-  };
-}
-
-function safeJsonParse(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return undefined;
-  }
-}
-
-async function fetchLocalSubtitleTranscript(
-  videoFile: Express.Multer.File,
-  subtitleFile: Express.Multer.File | undefined,
-  jobId: string,
-  signal: AbortSignal
-): Promise<{ transcript: TranscriptSegment[]; detail: string } | undefined> {
-  throwIfAborted(signal);
-  if (subtitleFile) {
-    const transcript = parseSubtitleText(await readFile(subtitleFile.path, "utf8"));
-    if (transcript.length > 0) {
-      return {
-        transcript,
-        detail: `使用上传的外挂字幕：${normalizeUploadFilename(subtitleFile.originalname)}`
-      };
-    }
-  }
-
-  const embeddedSubtitlePath = await extractEmbeddedSubtitle(videoFile.path, jobId, { signal });
-  if (!embeddedSubtitlePath) {
-    return undefined;
-  }
-
-  const transcript = parseSubtitleText(await readFile(embeddedSubtitlePath, "utf8"));
-  if (transcript.length === 0) {
-    return undefined;
-  }
-
-  return {
-    transcript,
-    detail: "使用视频内封字幕，跳过音频转写"
-  };
-}
-
-async function listWhisperModels() {
-  let installedFiles: string[] = [];
-  try {
-    installedFiles = (await readdir(whisperModelsDir)).filter((filename) => /^ggml-.+\.bin$/i.test(filename));
-  } catch {
-    installedFiles = [];
-  }
-
-  const installed = new Set(installedFiles);
-  return whisperModelCandidates.map((candidate) => {
-    const modelPath = path.join(whisperModelsDir, candidate.filename);
-    return {
-      ...candidate,
-      modelPath,
-      installed: installed.has(candidate.filename)
-    };
-  });
-}
-
-async function resolveWhisperModelPath(requestedPath: string): Promise<string | undefined> {
-  const requested = requestedPath.trim();
-  if (!requested) {
-    return undefined;
-  }
-
-  const models = await listWhisperModels();
-  const match = models.find(
-    (model) => model.modelPath === requested || path.basename(model.modelPath) === path.basename(requested)
-  );
-  if (!match?.installed) {
-    return undefined;
-  }
-  return match.modelPath;
-}
-
-async function fetchOnlineSubtitleTranscript(
-  url: string,
-  jobId: string,
-  title: string,
-  signal: AbortSignal
-): Promise<{ transcript: TranscriptSegment[]; source: string } | undefined> {
-  throwIfAborted(signal);
-  const bilibiliTranscript = await fetchBilibiliSubtitleTranscript(url, title);
-  if (bilibiliTranscript) {
-    return bilibiliTranscript;
-  }
-
-  if (isDirectVideoUrl(url)) {
-    return undefined;
-  }
-
-  const subtitlePath = await downloadSubtitleFromOnlineVideo(url, jobId, { signal });
-  if (!subtitlePath) {
-    return undefined;
-  }
-
-  const transcript = parseSubtitleText(await readFile(subtitlePath, "utf8"));
-  if (transcript.length === 0) {
-    return undefined;
-  }
-
-  return {
-    transcript,
-    source: path.basename(subtitlePath)
-  };
-}
-
-async function fetchBilibiliSubtitleTranscript(
-  url: string,
-  title: string
-): Promise<{ transcript: TranscriptSegment[]; source: string } | undefined> {
-  if (!/bilibili\.com|b23\.tv/i.test(url)) {
-    return undefined;
-  }
-
-  try {
-    const video = await fetchVideoInfo(url);
-    const subtitleResult = await fetchSubtitleLines(video);
-    const lines = buildTranscript(subtitleResult.lines);
-    if (lines.length === 0 || !isTranscriptRelevantToTitle(title || video.title, lines)) {
-      return undefined;
-    }
-    return {
-      transcript: lines.map((line) => ({
-        start: line.from,
-        end: line.to,
-        timestamp: line.timestamp,
-        text: line.content
-      })),
-      source: "Bilibili 字幕接口"
-    };
-  } catch {
-    return undefined;
-  }
 }
 
 function parseHttpUrl(value: string): URL | undefined {

@@ -13,32 +13,19 @@ export interface SummarizeInput {
   title: string;
   duration: number;
   transcript: string;
-  signal?: AbortSignal;
-  apiConfig?: ClientApiConfig;
 }
 
 export interface KnowledgeSummarizeInput {
   title: string;
   transcript: string;
   userNotes?: string;
-  signal?: AbortSignal;
-  apiConfig?: ClientApiConfig;
-}
-
-export interface ClientApiConfig {
-  provider?: "openai" | "deepseek" | "compatible";
-  apiKey?: string;
-  baseURL?: string;
-  model?: string;
 }
 
 export async function correctTranscriptSegments(input: {
   title: string;
   segments: TranscriptSegment[];
-  signal?: AbortSignal;
-  apiConfig?: ClientApiConfig;
 }): Promise<TranscriptSegment[]> {
-  const provider = resolveProviderConfig(input.apiConfig);
+  const provider = resolveProviderConfig();
   if (!provider.apiKey || input.segments.length === 0) {
     return input.segments;
   }
@@ -78,12 +65,10 @@ export async function correctTranscriptSegments(input: {
       createChatCompletion(client, {
         model,
         messages,
-        maxTokens: Number(process.env.TRANSCRIPT_CORRECTION_MAX_TOKENS || 3000),
-        signal: input.signal
+        maxTokens: Number(process.env.TRANSCRIPT_CORRECTION_MAX_TOKENS || 3000)
       }),
       modelTimeoutMs,
-      `转录校对请求超过 ${Math.round(modelTimeoutMs / 1000)} 秒未返回。`,
-      input.signal
+      `转录校对请求超过 ${Math.round(modelTimeoutMs / 1000)} 秒未返回。`
     );
     const text = response.choices[0]?.message?.content;
     if (!text) {
@@ -112,7 +97,7 @@ export async function correctTranscriptSegments(input: {
 }
 
 export async function summarizeTranscript(input: SummarizeInput): Promise<SummaryResult> {
-  const provider = resolveProviderConfig(input.apiConfig);
+  const provider = resolveProviderConfig();
   const apiKey = provider.apiKey;
   if (!apiKey) {
     return buildLocalFallbackSummary(input);
@@ -151,12 +136,10 @@ export async function summarizeTranscript(input: SummarizeInput): Promise<Summar
     response = await withTimeout(
       createChatCompletion(client, {
         model,
-        messages,
-        signal: input.signal
+        messages
       }),
       modelTimeoutMs,
-      `大模型请求超过 ${Math.round(modelTimeoutMs / 1000)} 秒未返回，请稍后重试或调小 MAX_TRANSCRIPT_CHARS。`,
-      input.signal
+      `大模型请求超过 ${Math.round(modelTimeoutMs / 1000)} 秒未返回，请稍后重试或调小 MAX_TRANSCRIPT_CHARS。`
     );
   } catch (error) {
     if (isRecoverableModelError(error)) {
@@ -183,12 +166,12 @@ export async function summarizeTranscript(input: SummarizeInput): Promise<Summar
 export async function summarizeKnowledgeTranscript(
   input: KnowledgeSummarizeInput
 ): Promise<KnowledgeSummary> {
-  const apiKey = resolveProviderConfig(input.apiConfig).apiKey;
+  const apiKey = resolveProviderConfig().apiKey;
   if (!apiKey) {
     return buildLocalKnowledgeFallback(input, "未配置大模型 API key");
   }
 
-  const provider = resolveProviderConfig(input.apiConfig);
+  const provider = resolveProviderConfig();
   const modelTimeoutMs = Number(process.env.OPENAI_TIMEOUT_MS || 60000);
   const client = new OpenAI({
     apiKey,
@@ -222,10 +205,9 @@ export async function summarizeKnowledgeTranscript(
 
   try {
     const response = await withTimeout(
-      createChatCompletion(client, { model, messages, signal: input.signal }),
+      createChatCompletion(client, { model, messages }),
       modelTimeoutMs,
-      `大模型请求超过 ${Math.round(modelTimeoutMs / 1000)} 秒未返回。`,
-      input.signal
+      `大模型请求超过 ${Math.round(modelTimeoutMs / 1000)} 秒未返回。`
     );
     const text = response.choices[0]?.message?.content;
     if (!text) {
@@ -249,26 +231,7 @@ interface ProviderConfig {
   kind: "deepseek" | "nvidia" | "openai" | "compatible";
 }
 
-function resolveProviderConfig(clientConfig?: ClientApiConfig): ProviderConfig {
-  const clientApiKey = clientConfig?.apiKey?.trim();
-  if (clientApiKey) {
-    const provider = clientConfig?.provider || "openai";
-    if (provider === "deepseek") {
-      return {
-        apiKey: clientApiKey,
-        baseURL: clientConfig?.baseURL?.trim() || "https://api.deepseek.com",
-        defaultModel: clientConfig?.model?.trim() || "deepseek-v4-flash",
-        kind: "deepseek"
-      };
-    }
-    return {
-      apiKey: clientApiKey,
-      baseURL: clientConfig?.baseURL?.trim() || undefined,
-      defaultModel: clientConfig?.model?.trim() || (provider === "openai" ? "gpt-4.1-mini" : undefined),
-      kind: provider === "compatible" ? "compatible" : detectProviderKind(clientConfig?.baseURL)
-    };
-  }
-
+function resolveProviderConfig(): ProviderConfig {
   const deepseekApiKey = process.env.DEEPSEEK_API_KEY?.trim();
   if (deepseekApiKey) {
     return {
@@ -371,7 +334,6 @@ async function createChatCompletion(
     model: string;
     messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
     maxTokens?: number;
-    signal?: AbortSignal;
   }
 ) {
   const baseParams = {
@@ -383,22 +345,19 @@ async function createChatCompletion(
 
   try {
     if (shouldSkipJsonMode()) {
-      return await client.chat.completions.create(baseParams, { signal: params.signal });
+      return await client.chat.completions.create(baseParams);
     }
 
-    return await client.chat.completions.create(
-      {
-        ...baseParams,
-        response_format: { type: "json_object" }
-      },
-      { signal: params.signal }
-    );
+    return await client.chat.completions.create({
+      ...baseParams,
+      response_format: { type: "json_object" }
+    });
   } catch (error) {
     if (!isUnsupportedJsonModeError(error)) {
       throw error;
     }
 
-    return client.chat.completions.create(baseParams, { signal: params.signal });
+    return client.chat.completions.create(baseParams);
   }
 }
 
@@ -543,35 +502,15 @@ function prepareTranscriptForModel(transcript: string): string {
   ].join("\n");
 }
 
-function withTimeout<T>(
-  promise: Promise<T>,
-  ms: number,
-  message: string,
-  signal?: AbortSignal
-): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
-  let abortHandler: (() => void) | undefined;
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
     timeout = setTimeout(() => reject(new Error(message)), ms);
   });
-  const abortPromise = new Promise<never>((_resolve, reject) => {
-    if (!signal) {
-      return;
-    }
-    abortHandler = () => reject(new Error("任务已取消"));
-    if (signal.aborted) {
-      abortHandler();
-      return;
-    }
-    signal.addEventListener("abort", abortHandler, { once: true });
-  });
 
-  return Promise.race([promise, timeoutPromise, abortPromise]).finally(() => {
+  return Promise.race([promise, timeoutPromise]).finally(() => {
     if (timeout) {
       clearTimeout(timeout);
-    }
-    if (signal && abortHandler) {
-      signal.removeEventListener("abort", abortHandler);
     }
   });
 }

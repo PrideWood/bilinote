@@ -1,13 +1,8 @@
 node_modules
 dist
-dist-server
 server/dist
-server/dist-server
 .env
 .DS_Store
 uploads
 models
 bin
-BiliNote AI.app
-src-tauri/target
-src-tauri/sidecars/*

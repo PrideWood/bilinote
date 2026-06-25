@@ -3,18 +3,13 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { TranscriptSegment } from "./jobs.js";
-import { defaultWhisperModelPath } from "./paths.js";
 import { transcriptOutputDir } from "./video.js";
 
 const execFileAsync = promisify(execFile);
 
-export async function transcribeAudio(
-  audioPath: string,
-  jobId: string,
-  options: { modelPath?: string; signal?: AbortSignal } = {}
-): Promise<TranscriptSegment[]> {
+export async function transcribeAudio(audioPath: string, jobId: string): Promise<TranscriptSegment[]> {
   const whisperBin = process.env.WHISPER_BIN_PATH || "./bin/whisper-cli";
-  const modelPath = options.modelPath || defaultWhisperModelPath;
+  const modelPath = process.env.WHISPER_MODEL_PATH || "./models/ggml-large-v3-turbo.bin";
   const language = process.env.WHISPER_LANGUAGE || "zh";
 
   await assertReadable(whisperBin, "未找到 whisper-cli，请设置 WHISPER_BIN_PATH。");
@@ -22,11 +17,18 @@ export async function transcribeAudio(
   await assertNonEmptyAudio(audioPath);
 
   const outputBase = path.join(transcriptOutputDir, jobId);
-  await execFileAsync(
-    whisperBin,
-    ["-m", modelPath, "-f", audioPath, "-l", language, "-otxt", "-osrt", "-of", outputBase],
-    { signal: options.signal }
-  );
+  await execFileAsync(whisperBin, [
+    "-m",
+    modelPath,
+    "-f",
+    audioPath,
+    "-l",
+    language,
+    "-otxt",
+    "-osrt",
+    "-of",
+    outputBase
+  ]);
 
   const srtPath = `${outputBase}.srt`;
   const txtPath = `${outputBase}.txt`;
@@ -54,14 +56,6 @@ export function parsePlainTranscript(text: string): TranscriptSegment[] {
       timestamp: formatTimestamp(index),
       text: line.replace(/^\[[^\]]+\]\s*/, "")
     }));
-}
-
-export function parseSubtitleText(text: string): TranscriptSegment[] {
-  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  if (normalized.includes("-->")) {
-    return parseTimedSubtitle(normalized);
-  }
-  return parsePlainTranscript(normalized);
 }
 
 export function transcriptSegmentsToText(segments: TranscriptSegment[]): string {
@@ -144,10 +138,6 @@ async function assertNonEmptyAudio(audioPath: string) {
 }
 
 function parseSrt(srt: string): TranscriptSegment[] {
-  return parseTimedSubtitle(srt);
-}
-
-function parseTimedSubtitle(srt: string): TranscriptSegment[] {
   const segments: TranscriptSegment[] = [];
   for (const block of srt.split(/\n\s*\n/)) {
     const lines = block.trim().split(/\n/);
@@ -157,11 +147,7 @@ function parseTimedSubtitle(srt: string): TranscriptSegment[] {
     }
 
     const [startRaw, endRaw] = timeLine.split("-->").map((item) => item.trim());
-    const text = lines
-      .slice(lines.indexOf(timeLine) + 1)
-      .map((line) => cleanSubtitleText(line))
-      .join(" ")
-      .trim();
+    const text = lines.slice(lines.indexOf(timeLine) + 1).join(" ").trim();
     if (!text) {
       continue;
     }
@@ -178,29 +164,17 @@ function parseTimedSubtitle(srt: string): TranscriptSegment[] {
 }
 
 function parseSrtTimestamp(value: string): number {
-  const match = value.match(/(?:(\d+):)?(\d+):(\d+)[,.](\d+)/);
+  const match = value.match(/(\d+):(\d+):(\d+),(\d+)/);
   if (!match) {
     return 0;
   }
-  const [, hours = "0", minutes, seconds, milliseconds] = match;
+  const [, hours, minutes, seconds, milliseconds] = match;
   return (
     Number(hours) * 3600 +
     Number(minutes) * 60 +
     Number(seconds) +
     Number(milliseconds) / 1000
   );
-}
-
-function cleanSubtitleText(value: string): string {
-  return value
-    .replace(/<[^>]+>/g, "")
-    .replace(/\{\\[^}]+\}/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function formatTimestamp(seconds: number): string {
