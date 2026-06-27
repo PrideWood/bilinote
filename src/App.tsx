@@ -131,6 +131,20 @@ interface ApiSettings {
   model: string;
 }
 
+interface SystemDependencyStatus {
+  platform: string;
+  canInstall: boolean;
+  installManager: "homebrew" | "manual";
+  allRequiredInstalled: boolean;
+  dependencies: Array<{
+    id: "ffmpeg" | "yt-dlp" | "whisper-cli" | "whisper-model";
+    label: string;
+    installed: boolean;
+    required: boolean;
+    detail: string;
+  }>;
+}
+
 interface MindMapNode {
   id: string;
   label: string;
@@ -210,9 +224,22 @@ const copy = {
     installModelTitle: "安装语音转文字模型？",
     installModelBody: "安装会下载模型文件到本地数据目录，下载期间请保持服务运行。",
     confirm: "确认",
+    refresh: "刷新",
     install: "安装",
     installing: "安装中...",
     notInstalled: "未安装",
+    systemDependencies: "系统依赖",
+    dependenciesReady: "系统依赖已就绪",
+    dependencyCheckFailed: "依赖检查失败",
+    dependencyInstallFailed: "依赖安装失败",
+    installDependencies: "一键安装",
+    checking: "检查中...",
+    installed: "已安装",
+    missing: "缺失",
+    required: "必需",
+    optional: "可选",
+    dependencyManualHint: "当前系统不支持一键安装，请参考 README 手动安装。",
+    dependencyInstallHint: "将通过 Homebrew 安装 ffmpeg、yt-dlp 和 whisper-cpp。模型文件仍可在语音转文字模型处安装。",
     transcriptSource: "处理方式",
     light: "浅色",
     dark: "深色",
@@ -285,9 +312,22 @@ const copy = {
     installModelTitle: "Install speech model?",
     installModelBody: "The model file will be downloaded into the local app data directory. Keep the service running while it installs.",
     confirm: "Confirm",
+    refresh: "Refresh",
     install: "Install",
     installing: "Installing...",
     notInstalled: "Not installed",
+    systemDependencies: "System dependencies",
+    dependenciesReady: "System dependencies are ready",
+    dependencyCheckFailed: "Dependency check failed",
+    dependencyInstallFailed: "Dependency install failed",
+    installDependencies: "Install",
+    checking: "Checking...",
+    installed: "Installed",
+    missing: "Missing",
+    required: "Required",
+    optional: "Optional",
+    dependencyManualHint: "One-click install is not available on this system. Please install dependencies manually from the README.",
+    dependencyInstallHint: "Homebrew will install ffmpeg, yt-dlp, and whisper-cpp. The Whisper model file can still be installed from the speech model control.",
     transcriptSource: "Processing",
     light: "Light",
     dark: "Dark",
@@ -363,6 +403,11 @@ export default function App() {
   const [localSubtitleFile, setLocalSubtitleFile] = useState<File | null>(null);
   const [modelInfoOpen, setModelInfoOpen] = useState(false);
   const [installCandidate, setInstallCandidate] = useState<WhisperModel | null>(null);
+  const [dependencyDialogOpen, setDependencyDialogOpen] = useState(false);
+  const [dependencyStatus, setDependencyStatus] = useState<SystemDependencyStatus | null>(null);
+  const [checkingDependencies, setCheckingDependencies] = useState(false);
+  const [installingDependencies, setInstallingDependencies] = useState(false);
+  const [dependencyMessage, setDependencyMessage] = useState("");
   const [apiSettings, setApiSettings] = useState<ApiSettings>(() => loadStoredApiSettings());
   const [playbackTime, setPlaybackTime] = useState(0);
   const [activeDetailTab, setActiveDetailTab] = useState<DetailTab>("转录");
@@ -552,6 +597,56 @@ export default function App() {
     }
     await installWhisperModel(installCandidate.id);
     setInstallCandidate(null);
+  }
+
+  async function loadDependencyStatus(options: { autoCloseWhenReady?: boolean } = {}) {
+    setCheckingDependencies(true);
+    setDependencyMessage("");
+    try {
+      const response = await fetch("/api/system-dependencies");
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error ?? t("dependencyCheckFailed"));
+      }
+      setDependencyStatus(payload);
+      if (payload.allRequiredInstalled && options.autoCloseWhenReady) {
+        setDependencyDialogOpen(false);
+        setDependencyMessage(t("dependenciesReady"));
+      }
+      return payload as SystemDependencyStatus;
+    } catch (err) {
+      setDependencyMessage(err instanceof Error ? err.message : t("dependencyCheckFailed"));
+      return null;
+    } finally {
+      setCheckingDependencies(false);
+    }
+  }
+
+  async function openDependencyDialog() {
+    setDependencyDialogOpen(true);
+    await loadDependencyStatus({ autoCloseWhenReady: true });
+  }
+
+  async function installSystemDependencies() {
+    setInstallingDependencies(true);
+    setDependencyMessage("");
+    try {
+      const response = await fetch("/api/system-dependencies/install", { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) {
+        setDependencyStatus(payload.status ?? dependencyStatus);
+        throw new Error(payload.error ?? t("dependencyInstallFailed"));
+      }
+      setDependencyStatus(payload);
+      if (payload.allRequiredInstalled) {
+        setDependencyDialogOpen(false);
+        setDependencyMessage(t("dependenciesReady"));
+      }
+    } catch (err) {
+      setDependencyMessage(err instanceof Error ? err.message : t("dependencyInstallFailed"));
+    } finally {
+      setInstallingDependencies(false);
+    }
   }
 
   async function deleteJob(jobId: string) {
@@ -781,6 +876,17 @@ export default function App() {
                         </button>
                       </div>
                     </div>
+                    <div className="setting-row compact-setting-row">
+                      <span>{t("systemDependencies")}</span>
+                      <button
+                        className="settings-inline-button"
+                        disabled={checkingDependencies || installingDependencies}
+                        onClick={() => void openDependencyDialog()}
+                        type="button"
+                      >
+                        {checkingDependencies ? t("checking") : t("systemDependencies")}
+                      </button>
+                    </div>
                     <div className="setting-row compact-setting-row model-setting-row">
                       <span className="setting-label-with-info">
                         {t("speechModel")}
@@ -894,6 +1000,7 @@ export default function App() {
         )}
 
         {error && <div className="notice error">{error}</div>}
+        {dependencyMessage && <div className="notice inline-notice">{dependencyMessage}</div>}
 
         {selectedJobId ? (
             <DetailView
@@ -946,6 +1053,18 @@ export default function App() {
             onCancel={() => setInstallCandidate(null)}
             onConfirm={() => void confirmInstallWhisperModel()}
             title={t("installModelTitle")}
+          />
+        )}
+        {dependencyDialogOpen && (
+          <DependencyDialog
+            checking={checkingDependencies}
+            installing={installingDependencies}
+            message={dependencyMessage}
+            onCancel={() => setDependencyDialogOpen(false)}
+            onInstall={() => void installSystemDependencies()}
+            onRefresh={() => void loadDependencyStatus()}
+            status={dependencyStatus}
+            t={t}
           />
         )}
       </section>
@@ -1874,6 +1993,74 @@ function CurrentCaptionPanel({ segment }: { segment?: TranscriptSegment }) {
   return (
     <div className="current-caption-panel">
       <p>{segment ? formatTranscriptDisplayText(segment.text) : ""}</p>
+    </div>
+  );
+}
+
+function DependencyDialog({
+  checking,
+  installing,
+  message,
+  onCancel,
+  onInstall,
+  onRefresh,
+  status,
+  t
+}: {
+  checking: boolean;
+  installing: boolean;
+  message: string;
+  onCancel: () => void;
+  onInstall: () => void;
+  onRefresh: () => void;
+  status: SystemDependencyStatus | null;
+  t: (key: CopyKey) => string;
+}) {
+  const dependencies = status?.dependencies ?? [];
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section aria-modal="true" className="dependency-dialog" role="dialog">
+        <header>
+          <h2>{t("systemDependencies")}</h2>
+          <button aria-label={t("cancel")} onClick={onCancel} type="button">
+            ×
+          </button>
+        </header>
+        <p>{status?.canInstall ? t("dependencyInstallHint") : t("dependencyManualHint")}</p>
+        <div className="dependency-list">
+          {dependencies.length === 0 ? (
+            <div className="dependency-row muted">{checking ? t("checking") : t("none")}</div>
+          ) : (
+            dependencies.map((item) => (
+              <div className="dependency-row" key={item.id}>
+                <div>
+                  <strong>{item.label}</strong>
+                  <small>{item.detail}</small>
+                </div>
+                <span className={`dependency-badge ${item.installed ? "ready" : "missing"}`}>
+                  {item.installed ? t("installed") : t("missing")}
+                  {" · "}
+                  {item.required ? t("required") : t("optional")}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+        {message && <p className="dependency-message">{message}</p>}
+        <div className="confirm-actions">
+          <button className="ghost-button" disabled={checking || installing} onClick={onRefresh} type="button">
+            {checking ? t("checking") : t("refresh")}
+          </button>
+          <button
+            className="edit-button"
+            disabled={!status?.canInstall || checking || installing}
+            onClick={onInstall}
+            type="button"
+          >
+            {installing ? t("installing") : t("installDependencies")}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

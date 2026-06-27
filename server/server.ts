@@ -1,13 +1,15 @@
 import cors from "cors";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import dotenv from "dotenv";
 import express from "express";
 import multer from "multer";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
 import {
   buildTranscript,
   fetchBilibiliAudioUrl,
@@ -61,6 +63,7 @@ import {
 
 dotenv.config();
 
+const execFileAsync = promisify(execFile);
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
 const maxUploadMb = Number(process.env.MAX_UPLOAD_MB || 2048);
@@ -102,6 +105,29 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.get("/api/system-dependencies", async (_req, res) => {
+  res.json(await getSystemDependencyStatus());
+});
+
+app.post("/api/system-dependencies/install", async (_req, res) => {
+  try {
+    if (process.platform !== "darwin") {
+      return res.status(400).json({ error: "一键安装目前仅支持 macOS + Homebrew。" });
+    }
+    if (!(await commandExists("brew"))) {
+      return res.status(400).json({ error: "未检测到 Homebrew。请先安装 Homebrew 后重试。" });
+    }
+
+    await execFileAsync("brew", ["install", "ffmpeg", "yt-dlp", "whisper-cpp"], {
+      timeout: Number(process.env.SYSTEM_DEPENDENCY_INSTALL_TIMEOUT_MS || 10 * 60 * 1000)
+    });
+    return res.json(await getSystemDependencyStatus());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "系统依赖安装失败";
+    return res.status(500).json({ error: message, status: await getSystemDependencyStatus() });
+  }
 });
 
 app.get("/api/whisper-models", async (_req, res) => {
@@ -848,6 +874,90 @@ function normalizeUploadFilename(filename: string): string {
     // Keep original below.
   }
   return filename;
+}
+
+interface SystemDependencyStatus {
+  platform: NodeJS.Platform;
+  canInstall: boolean;
+  installManager: "homebrew" | "manual";
+  allRequiredInstalled: boolean;
+  dependencies: Array<{
+    id: "ffmpeg" | "yt-dlp" | "whisper-cli" | "whisper-model";
+    label: string;
+    installed: boolean;
+    required: boolean;
+    detail: string;
+  }>;
+}
+
+async function getSystemDependencyStatus(): Promise<SystemDependencyStatus> {
+  const hasBrew = await commandExists("brew");
+  const whisperBin = process.env.WHISPER_BIN_PATH || "whisper-cli";
+  const modelPath = defaultWhisperModelPath;
+  const dependencies: SystemDependencyStatus["dependencies"] = [
+    {
+      id: "ffmpeg",
+      label: "ffmpeg",
+      installed: await commandExists("ffmpeg"),
+      required: true,
+      detail: "用于抽取音频和读取本地视频内封字幕"
+    },
+    {
+      id: "yt-dlp",
+      label: "yt-dlp",
+      installed: await commandExists(process.env.ONLINE_VIDEO_DOWNLOADER_BIN_PATH || "yt-dlp"),
+      required: false,
+      detail: "用于处理 YouTube、Bilibili 等在线视频链接"
+    },
+    {
+      id: "whisper-cli",
+      label: "whisper-cli",
+      installed: await executableExists(whisperBin),
+      required: true,
+      detail: "用于本地语音转文字；macOS 可通过 brew install whisper-cpp 安装"
+    },
+    {
+      id: "whisper-model",
+      label: path.basename(modelPath),
+      installed: await fileExists(modelPath),
+      required: true,
+      detail: "Whisper 模型文件；可在设置中的语音转文字模型处安装"
+    }
+  ];
+  const allRequiredInstalled = dependencies.every((item) => !item.required || item.installed);
+
+  return {
+    platform: process.platform,
+    canInstall: process.platform === "darwin" && hasBrew,
+    installManager: process.platform === "darwin" && hasBrew ? "homebrew" : "manual",
+    allRequiredInstalled,
+    dependencies
+  };
+}
+
+async function executableExists(command: string): Promise<boolean> {
+  if (command.includes("/") || path.isAbsolute(command)) {
+    return fileExists(command);
+  }
+  return commandExists(command);
+}
+
+async function commandExists(command: string): Promise<boolean> {
+  try {
+    await execFileAsync("which", [command]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function looksLikeMojibake(value: string): boolean {
