@@ -12,11 +12,11 @@ export async function transcribeAudio(
   jobId: string,
   options: { modelPath?: string; signal?: AbortSignal } = {}
 ): Promise<TranscriptSegment[]> {
-  const whisperBin = process.env.WHISPER_BIN_PATH || "./bin/whisper-cli";
+  const whisperBin = process.env.WHISPER_BIN_PATH || "whisper-cli";
   const modelPath = options.modelPath || process.env.WHISPER_MODEL_PATH || "./models/ggml-large-v3-turbo.bin";
   const language = process.env.WHISPER_LANGUAGE || "zh";
 
-  await assertReadable(whisperBin, "未找到 whisper-cli，请设置 WHISPER_BIN_PATH。");
+  await assertExecutable(whisperBin, "未找到 whisper-cli，请设置 WHISPER_BIN_PATH。");
   await assertReadable(modelPath, "未找到 Whisper 模型文件，请设置 WHISPER_MODEL_PATH。");
   await assertNonEmptyAudio(audioPath);
 
@@ -130,6 +130,19 @@ export function segmentsToSrt(segments: TranscriptSegment[]): string {
 async function assertReadable(filePath: string, message: string) {
   try {
     await access(filePath);
+  } catch {
+    throw new Error(message);
+  }
+}
+
+async function assertExecutable(command: string, message: string) {
+  if (command.includes("/") || path.isAbsolute(command)) {
+    await assertReadable(command, message);
+    return;
+  }
+
+  try {
+    await execFileAsync("which", [command]);
   } catch {
     throw new Error(message);
   }
