@@ -33,9 +33,11 @@ macOS 可参考：
 brew install ffmpeg yt-dlp
 ```
 
-`whisper-cli` 需要自行从 whisper.cpp 编译或下载适合本机的可执行文件，并放到 `./bin/whisper-cli`，或在 `.env` 中设置 `WHISPER_BIN_PATH` 指向它。模型文件可在应用设置中安装，也可以手动放到 `./models/`。
+`whisper-cli` 可以通过 Homebrew 安装 whisper.cpp，或自行从 whisper.cpp 编译/下载适合本机的可执行文件。只要 `whisper-cli` 在 PATH 中即可；也可以在 `.env` 中设置 `WHISPER_BIN_PATH` 指向它。模型文件可在应用设置中安装，也可以手动放到 `./models/`。
 
 如果暂时没有 `whisper-cli` 或模型，仍可使用“手动 transcript”或有字幕的在线视频来验证总结链路。
+
+macOS + Homebrew 用户也可以在应用右上角“设置 -> 系统依赖”中检查并一键安装 `ffmpeg`、`yt-dlp` 和 `whisper-cpp`。如果必需依赖已经齐全，弹窗会自动关闭。
 
 ## 快速开始
 
@@ -99,7 +101,7 @@ MIND_MAP_TRANSCRIPT_CHUNK_CHARS=5000
 ### Whisper
 
 ```env
-WHISPER_BIN_PATH=./bin/whisper-cli
+WHISPER_BIN_PATH=whisper-cli
 WHISPER_MODEL_PATH=./models/ggml-large-v3-turbo.bin
 WHISPER_MODELS_DIR=./models
 WHISPER_LANGUAGE=zh
