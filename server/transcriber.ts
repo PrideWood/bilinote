@@ -82,20 +82,23 @@ export function mergeTranscriptSegments(segments: TranscriptSegment[]): Transcri
       continue;
     }
 
+    const joinedText = joinTranscriptText(current.text, text);
     const gap = segment.start - (current.end ?? current.start);
-    const duration = (current.end ?? current.start) - current.start;
+    const duration = (segment.end ?? segment.start) - current.start;
+    const currentHasSentenceEnd = endsWithStrongPunctuation(current.text);
+    const nextLooksLikeContinuation = startsWithContinuation(text);
     const shouldMerge =
-      gap <= 1.2 &&
-      duration <= 12 &&
-      current.text.length <= 80 &&
-      !endsWithStrongPunctuation(current.text);
+      gap <= 1.8 &&
+      joinedText.length <= 240 &&
+      duration <= 32 &&
+      (!currentHasSentenceEnd || nextLooksLikeContinuation);
 
     if (shouldMerge) {
       current = {
         start: current.start,
         end: segment.end ?? segment.start,
         timestamp: current.timestamp,
-        text: joinTranscriptText(current.text, text)
+        text: joinedText
       };
     } else {
       merged.push(current);
@@ -239,6 +242,19 @@ function formatSrtTimestamp(seconds: number): string {
 
 function endsWithStrongPunctuation(text: string): boolean {
   return /[。！？!?；;]$/.test(text.trim());
+}
+
+function startsWithContinuation(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (/^[,，.。!?！？;；:：、)]/.test(trimmed)) {
+    return true;
+  }
+  return /^(and|or|but|so|because|then|that|which|who|when|where|while|if|to|of|for|with|in|on|at|as)\b/i.test(
+    trimmed
+  );
 }
 
 function joinTranscriptText(left: string, right: string): string {

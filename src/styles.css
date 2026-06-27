@@ -1371,6 +1371,35 @@ button {
   overflow-wrap: anywhere;
 }
 
+.dismissible-notice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.dismissible-notice button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #667085;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  padding: 0;
+}
+
+.dismissible-notice button:hover,
+.dismissible-notice button:focus {
+  background: #eef3fb;
+  color: #374151;
+  outline: none;
+}
+
 .detail-grid {
   display: grid;
   grid-template-columns: minmax(320px, var(--video-width, 57%)) 8px minmax(320px, 1fr);
@@ -2293,7 +2322,9 @@ ul {
 :root[data-theme="dark"] .history-pagination button:focus,
 :root[data-theme="dark"] .export-dropdown a:hover,
 :root[data-theme="dark"] .export-dropdown button:hover,
-:root[data-theme="dark"] .export-dropdown button:focus {
+:root[data-theme="dark"] .export-dropdown button:focus,
+:root[data-theme="dark"] .dismissible-notice button:hover,
+:root[data-theme="dark"] .dismissible-notice button:focus {
   background: #1e293b;
 }
 

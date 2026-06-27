@@ -1000,7 +1000,14 @@ export default function App() {
         )}
 
         {error && <div className="notice error">{error}</div>}
-        {dependencyMessage && <div className="notice inline-notice">{dependencyMessage}</div>}
+        {dependencyMessage && (
+          <div className="notice inline-notice dismissible-notice">
+            <span>{dependencyMessage}</span>
+            <button aria-label={t("cancel")} onClick={() => setDependencyMessage("")} type="button">
+              ×
+            </button>
+          </div>
+        )}
 
         {selectedJobId ? (
             <DetailView
