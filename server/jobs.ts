@@ -36,8 +36,16 @@ export interface KnowledgeSummary {
     term: string;
     definition: string;
   }>;
+  mindMap?: MindMapSummaryNode[];
   reviewQuestions: string[];
   model: string;
+}
+
+export interface MindMapSummaryNode {
+  title: string;
+  timestamp?: string;
+  summary?: string;
+  children?: MindMapSummaryNode[];
 }
 
 export type TranscriptSource = "manual" | "subtitle" | "whisper" | "cache";

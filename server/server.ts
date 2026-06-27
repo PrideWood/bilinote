@@ -926,6 +926,10 @@ function summaryMarkdown(summary?: KnowledgeSummary): string[] {
     "",
     ...summary.timelineNotes.map((item) => `- [${item.timestamp || "--:--"}] ${item.note}`),
     "",
+    "## 思维导图",
+    "",
+    ...mindMapMarkdown(summary.mindMap ?? []),
+    "",
     "## 术语",
     "",
     ...summary.terms.map((item) => `- **${item.term}**：${item.definition}`),
@@ -934,6 +938,22 @@ function summaryMarkdown(summary?: KnowledgeSummary): string[] {
     "",
     ...markdownList(summary.reviewQuestions)
   ];
+}
+
+function mindMapMarkdown(nodes: NonNullable<KnowledgeSummary["mindMap"]>, depth = 0): string[] {
+  if (nodes.length === 0) {
+    return depth === 0 ? ["暂无思维导图内容。"] : [];
+  }
+
+  return nodes.flatMap((node) => {
+    const indent = "  ".repeat(depth);
+    const timestamp = node.timestamp ? `[${node.timestamp}] ` : "";
+    const summary = node.summary ? `：${node.summary}` : "";
+    return [
+      `${indent}- ${timestamp}${node.title}${summary}`,
+      ...mindMapMarkdown(node.children ?? [], depth + 1)
+    ];
+  });
 }
 
 function markdownList(items: string[]): string[] {
@@ -1200,7 +1220,7 @@ async function fetchOnlineSubtitleTranscript(
     return undefined;
   }
 
-  const subtitlePath = await downloadSubtitleFromOnlineVideo(url, jobId, { signal });
+  const subtitlePath = await downloadSubtitleFromOnlineVideo(url, jobId, { signal, title });
   if (!subtitlePath) {
     return undefined;
   }
