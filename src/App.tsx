@@ -1,8 +1,10 @@
 import {
   type CSSProperties,
   type FormEvent,
+  type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type WheelEvent as ReactWheelEvent,
   useEffect,
   useMemo,
   useRef,
@@ -43,8 +45,16 @@ interface KnowledgeSummary {
     term: string;
     definition: string;
   }>;
+  mindMap?: MindMapSummaryNode[];
   reviewQuestions: string[];
   model: string;
+}
+
+interface MindMapSummaryNode {
+  title: string;
+  timestamp?: string;
+  summary?: string;
+  children?: MindMapSummaryNode[];
 }
 
 interface ProcessingInfo {
@@ -121,7 +131,34 @@ interface ApiSettings {
   model: string;
 }
 
-const detailTabs = ["笔记", "转录", "知识点"] as const;
+interface MindMapNode {
+  id: string;
+  label: string;
+  detail?: string;
+  timestamp?: string;
+  seconds?: number;
+  children: MindMapNode[];
+}
+
+interface MindMapLayoutNode {
+  id: string;
+  label: string;
+  detail?: string;
+  timestamp?: string;
+  seconds?: number;
+  x: number;
+  y: number;
+  depth: number;
+  hasChildren: boolean;
+}
+
+interface MindMapLink {
+  from: MindMapLayoutNode;
+  to: MindMapLayoutNode;
+}
+
+const mindMapNodeWidth = 300;
+const detailTabs = ["笔记", "转录", "知识点", "思维导图"] as const;
 type DetailTab = (typeof detailTabs)[number];
 type AppLanguage = "zh" | "en";
 type AppTheme = "light" | "dark";
@@ -131,6 +168,12 @@ type LocalTranscriptMode = "auto" | "whisper" | "subtitle";
 interface YouTubePlayer {
   destroy: () => void;
   getCurrentTime: () => number;
+  playVideo: () => void;
+  seekTo: (seconds: number, allowSeekAhead?: boolean) => void;
+}
+
+interface EmbedSeekController {
+  seekTo: (seconds: number) => boolean;
 }
 
 declare global {
@@ -220,6 +263,9 @@ const copy = {
     coreConclusions: "核心结论",
     logicFlow: "逻辑脉络",
     unnamedKnowledge: "知识点",
+    mindMap: "思维导图",
+    reset: "重置",
+    terms: "术语",
     none: "暂无内容",
     savedTo: "已保存到"
   },
@@ -292,6 +338,9 @@ const copy = {
     coreConclusions: "Core conclusions",
     logicFlow: "Logic flow",
     unnamedKnowledge: "Knowledge point",
+    mindMap: "Mind map",
+    reset: "Reset",
+    terms: "Terms",
     none: "Nothing yet",
     savedTo: "Saved to"
   }
@@ -353,6 +402,7 @@ export default function App() {
   }, [themePreference]);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const embedSeekRef = useRef<EmbedSeekController | null>(null);
   const t = (key: CopyKey) => copy[language][key];
 
   function cancelSettingsClose() {
@@ -637,6 +687,10 @@ export default function App() {
       return;
     }
     if (!player) {
+      if (embedSeekRef.current?.seekTo(Math.max(0, seconds))) {
+        setPlaybackTime(Math.max(0, seconds));
+        return;
+      }
       setPlaybackTime(Math.max(0, seconds));
       setEmbedSeek((current) => ({
         seconds: Math.max(0, seconds),
@@ -842,11 +896,12 @@ export default function App() {
         {error && <div className="notice error">{error}</div>}
 
         {selectedJobId ? (
-          <DetailView
-            activeTab={activeDetailTab}
-            embedSeek={embedSeek}
-            hasPlayableVideo={hasPlayableVideo}
-            job={selectedJob}
+            <DetailView
+              activeTab={activeDetailTab}
+              embedSeek={embedSeek}
+              embedSeekRef={embedSeekRef}
+              hasPlayableVideo={hasPlayableVideo}
+              job={selectedJob}
             onBack={closeJob}
             onChangeTab={setActiveDetailTab}
             onJobUpdate={setSelectedJob}
@@ -1344,6 +1399,7 @@ function HistoryPagination({
 function DetailView({
   activeTab,
   embedSeek,
+  embedSeekRef,
   hasPlayableVideo,
   job,
   onBack,
@@ -1361,6 +1417,7 @@ function DetailView({
 }: {
   activeTab: DetailTab;
   embedSeek: { seconds: number; nonce: number } | null;
+  embedSeekRef: MutableRefObject<EmbedSeekController | null>;
   hasPlayableVideo: boolean;
   job: JobRecord | null;
   onBack: () => void;
@@ -1548,6 +1605,7 @@ function DetailView({
           {hasPlayableVideo ? (
             <OnlinePlayer
               embedSeek={embedSeek}
+              embedSeekRef={embedSeekRef}
               job={job}
               onTimeUpdate={onPlaybackTimeChange}
               videoRef={videoRef}
@@ -1661,6 +1719,9 @@ function DetailView({
           {activeTab === "知识点" && (
             <KnowledgePane onSeek={onSeek} summary={summary} transcript={transcript} t={t} />
           )}
+          {activeTab === "思维导图" && (
+            <MindMapPane onSeek={onSeek} summary={summary} transcript={transcript} t={t} />
+          )}
         </aside>
       </div>
     </section>
@@ -1669,12 +1730,14 @@ function DetailView({
 
 function OnlinePlayer({
   embedSeek,
+  embedSeekRef,
   job,
   onTimeUpdate,
   videoRef,
   t
 }: {
   embedSeek: { seconds: number; nonce: number } | null;
+  embedSeekRef: MutableRefObject<EmbedSeekController | null>;
   job: JobRecord | null;
   onTimeUpdate: (seconds: number) => void;
   videoRef: React.RefObject<HTMLVideoElement | null>;
@@ -1686,6 +1749,12 @@ function OnlinePlayer({
   const localVideoUrl = job?.id && video?.storedPath ? `/api/jobs/${job.id}/video` : undefined;
   const directVideoUrl = localVideoUrl ?? video?.playbackUrl;
   const embedUrl = video?.embedUrl ? withStartTime(video.embedUrl, embedSeek?.seconds) : undefined;
+
+  useEffect(() => {
+    if (directVideoUrl) {
+      embedSeekRef.current = null;
+    }
+  }, [directVideoUrl, embedSeekRef]);
 
   useEffect(() => {
     if (!embedUrl?.includes("youtube.com")) {
@@ -1726,6 +1795,21 @@ function OnlinePlayer({
       youtubePlayerRef.current = new window.YT.Player(iframeRef.current, {
         events: {
           onReady: () => {
+            embedSeekRef.current = {
+              seekTo: (seconds: number) => {
+                const player = youtubePlayerRef.current;
+                if (!player || !Number.isFinite(seconds)) {
+                  return false;
+                }
+                player.seekTo(Math.max(0, seconds), true);
+                player.playVideo();
+                onTimeUpdate(Math.max(0, seconds));
+                return true;
+              }
+            };
+            if (typeof embedSeek?.seconds === "number") {
+              youtubePlayerRef.current?.seekTo(Math.max(0, embedSeek.seconds), true);
+            }
             readCurrentTime();
             timer = window.setInterval(readCurrentTime, 500);
           },
@@ -1752,9 +1836,10 @@ function OnlinePlayer({
       }
       youtubePlayerRef.current?.destroy();
       youtubePlayerRef.current = null;
+      embedSeekRef.current = null;
       window.removeEventListener("message", handleMessage);
     };
-  }, [embedUrl, onTimeUpdate]);
+  }, [embedSeek?.seconds, embedSeekRef, embedUrl, onTimeUpdate]);
 
   if (directVideoUrl) {
     return (
@@ -1928,7 +2013,7 @@ function TranscriptPane({
           return editing ? (
             <div
               className={`minute-line editing-line ${isActive ? "active-line" : ""}`}
-              key={`${item.timestamp}-${item.start}`}
+              key={`${item.timestamp}-${item.start}-${originalIndex}`}
               ref={isActive ? (node) => { activeLineRef.current = node; } : undefined}
             >
               <button onClick={() => onSeek(item.start)} type="button">
@@ -1949,7 +2034,7 @@ function TranscriptPane({
           ) : (
             <button
               className={`minute-line ${isActive ? "active-line" : ""}`}
-              key={`${item.timestamp}-${item.start}`}
+              key={`${item.timestamp}-${item.start}-${originalIndex}`}
               onClick={() => onSeek(item.start)}
               ref={isActive ? (node) => { activeLineRef.current = node; } : undefined}
               type="button"
@@ -2020,6 +2105,343 @@ function KnowledgePane({
       ))}
     </div>
   );
+}
+
+function MindMapPane({
+  onSeek,
+  summary,
+  transcript,
+  t
+}: {
+  onSeek: (seconds: number) => void;
+  summary?: KnowledgeSummary;
+  transcript: TranscriptSegment[];
+  t: (key: CopyKey) => string;
+}) {
+  if (!summary) {
+    return <div className="empty-state compact-empty">{t("knowledgeEmpty")}</div>;
+  }
+
+  return <MindMapCanvas onSeek={onSeek} root={buildMindMap(summary, transcript, t)} t={t} />;
+}
+
+function MindMapCanvas({
+  onSeek,
+  root,
+  t
+}: {
+  onSeek: (seconds: number) => void;
+  root: MindMapNode;
+  t: (key: CopyKey) => string;
+}) {
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
+  const [scale, setScale] = useState(0.82);
+  const [pan, setPan] = useState({ x: 34, y: 24 });
+  const [isPanning, setIsPanning] = useState(false);
+  const panStartRef = useRef<{ pointerX: number; pointerY: number; x: number; y: number } | null>(null);
+  const layout = useMemo(() => layoutMindMap(root, collapsedIds), [root, collapsedIds]);
+
+  useEffect(() => {
+    setCollapsedIds(new Set());
+    setPan({ x: 34, y: 24 });
+    setScale(0.82);
+  }, [root.id]);
+
+  function toggleNode(id: string) {
+    setCollapsedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function zoomBy(delta: number) {
+    setScale((current) => clampNumber(Number((current + delta).toFixed(2)), 0.45, 1.6));
+  }
+
+  function resetView() {
+    setScale(0.82);
+    setPan({ x: 34, y: 24 });
+  }
+
+  function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    zoomBy(event.deltaY > 0 ? -0.06 : 0.06);
+  }
+
+  function startPan(event: ReactPointerEvent<HTMLDivElement>) {
+    if ((event.target as HTMLElement).closest("button, .mind-map-node")) {
+      return;
+    }
+    event.currentTarget.setPointerCapture(event.pointerId);
+    panStartRef.current = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      x: pan.x,
+      y: pan.y
+    };
+    setIsPanning(true);
+  }
+
+  function movePan(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!panStartRef.current) {
+      return;
+    }
+    setPan({
+      x: panStartRef.current.x + event.clientX - panStartRef.current.pointerX,
+      y: panStartRef.current.y + event.clientY - panStartRef.current.pointerY
+    });
+  }
+
+  function stopPan() {
+    panStartRef.current = null;
+    setIsPanning(false);
+  }
+
+  return (
+    <section className={`mind-map-panel ${isPanning ? "panning" : ""}`}>
+      <div className="mind-map-toolbar">
+        <strong>{t("mindMap")}</strong>
+        <div className="mind-map-controls">
+          <button aria-label="缩小思维导图" onClick={() => zoomBy(-0.1)} type="button">
+            −
+          </button>
+          <span>{Math.round(scale * 100)}%</span>
+          <button aria-label="放大思维导图" onClick={() => zoomBy(0.1)} type="button">
+            +
+          </button>
+          <button onClick={resetView} type="button">
+            {t("reset")}
+          </button>
+        </div>
+      </div>
+      <div
+        className="mind-map-viewport"
+        onPointerDown={startPan}
+        onPointerLeave={stopPan}
+        onPointerMove={movePan}
+        onPointerUp={stopPan}
+        onWheel={handleWheel}
+      >
+        <div
+          className="mind-map-stage"
+          style={{
+            width: layout.width,
+            height: layout.height,
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`
+          }}
+        >
+          <svg
+            aria-hidden="true"
+            className="mind-map-links"
+            height={layout.height}
+            viewBox={`0 0 ${layout.width} ${layout.height}`}
+            width={layout.width}
+          >
+            {layout.links.map((link) => (
+              <path
+                d={mindMapPath(link.from, link.to)}
+                key={`${link.from.id}-${link.to.id}`}
+              />
+            ))}
+          </svg>
+          {layout.nodes.map((node) => {
+            const collapsed = collapsedIds.has(node.id);
+            return (
+              <div
+                className={`mind-map-node depth-${Math.min(node.depth, 3)} ${collapsed ? "collapsed" : ""}`}
+                key={node.id}
+                onClick={() => {
+                  if (typeof node.seconds === "number") {
+                    onSeek(node.seconds);
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if ((event.key === "Enter" || event.key === " ") && typeof node.seconds === "number") {
+                    event.preventDefault();
+                    onSeek(node.seconds);
+                  }
+                }}
+                role={typeof node.seconds === "number" ? "button" : "treeitem"}
+                style={{ left: node.x, top: node.y }}
+                tabIndex={0}
+                title={node.timestamp ? `${node.timestamp} ${node.label}` : node.label}
+              >
+                {node.timestamp && <time>{node.timestamp}</time>}
+                <span>{node.label}</span>
+                {node.detail && <small>{node.detail}</small>}
+                {node.hasChildren && (
+                  <button
+                    aria-label={collapsed ? "展开节点" : "折叠节点"}
+                    className="mind-map-toggle"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleNode(node.id);
+                    }}
+                    type="button"
+                  >
+                    {collapsed ? "+" : "−"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function buildMindMap(
+  summary: KnowledgeSummary,
+  transcript: TranscriptSegment[],
+  t: (key: CopyKey) => string
+): MindMapNode {
+  const orderedNodes =
+    summary.mindMap && summary.mindMap.length > 0
+      ? summary.mindMap.map((node, index) => normalizeMindMapNode(node, `mind-${index}`, transcript))
+      : buildTimelineMindMapFallback(summary, transcript);
+
+  return {
+    id: `root-${summary.model}-${summary.overview.slice(0, 60)}-${orderedNodes.length}`,
+    label: t("mindMap"),
+    detail: summary.overview,
+    children: orderedNodes
+  };
+}
+
+function normalizeMindMapNode(
+  node: MindMapSummaryNode,
+  id: string,
+  transcript: TranscriptSegment[]
+): MindMapNode {
+  const timestamp = node.timestamp || extractTimestamp(`${node.title} ${node.summary ?? ""}`);
+  const matchedSegment = timestamp ? undefined : findBestSegment(`${node.title} ${node.summary ?? ""}`, transcript);
+  const seconds = timestamp ? timestampToSeconds(timestamp) : matchedSegment?.start;
+
+  return {
+    id,
+    label: stripLeadingTimestamp(node.title || node.summary || "未命名节点"),
+    detail: node.summary ? stripLeadingTimestamp(node.summary) : undefined,
+    timestamp: timestamp ?? matchedSegment?.timestamp,
+    seconds,
+    children: (node.children ?? []).map((child, index) => normalizeMindMapNode(child, `${id}-${index}`, transcript))
+  };
+}
+
+function buildTimelineMindMapFallback(
+  summary: KnowledgeSummary,
+  transcript: TranscriptSegment[]
+): MindMapNode[] {
+  const timeline = summary.timelineNotes.length > 0
+    ? summary.timelineNotes
+    : transcript.slice(0, 12).map((segment) => ({ timestamp: segment.timestamp, note: segment.text }));
+
+  const groupSize = 4;
+  const groups: MindMapNode[] = [];
+  for (let index = 0; index < timeline.length; index += groupSize) {
+    const group = timeline.slice(index, index + groupSize);
+    const first = group[0];
+    groups.push({
+      id: `timeline-group-${index}`,
+      label: `${first?.timestamp ?? "00:00"} 起的视频段落`,
+      detail: group.map((item) => stripLeadingTimestamp(item.note)).join(" / ").slice(0, 160),
+      timestamp: first?.timestamp,
+      seconds: first ? timestampToSeconds(first.timestamp) : undefined,
+      children: group.map((item, childIndex) => ({
+        id: `timeline-${index}-${childIndex}`,
+        label: stripLeadingTimestamp(item.note).slice(0, 90),
+        detail: stripLeadingTimestamp(item.note),
+        timestamp: item.timestamp,
+        seconds: timestampToSeconds(item.timestamp),
+        children: []
+      }))
+    });
+  }
+  return groups;
+}
+
+function layoutMindMap(root: MindMapNode, collapsedIds: Set<string>) {
+  const nodes: MindMapLayoutNode[] = [];
+  const links: MindMapLink[] = [];
+  const leafSpacing = 82;
+  const levelGap = 380;
+  const nodeWidth = mindMapNodeWidth;
+  let cursorY = 30;
+  let maxDepth = 0;
+
+  function measure(node: MindMapNode): number {
+    if (collapsedIds.has(node.id) || node.children.length === 0) {
+      return leafSpacing;
+    }
+    return node.children.reduce((height, child) => height + measure(child), 0);
+  }
+
+  function place(node: MindMapNode, depth: number): MindMapLayoutNode {
+    maxDepth = Math.max(maxDepth, depth);
+    const visibleChildren = collapsedIds.has(node.id) ? [] : node.children;
+    const x = 22 + depth * levelGap;
+    let y: number;
+
+    if (visibleChildren.length === 0) {
+      y = cursorY;
+      cursorY += leafSpacing;
+    } else {
+      const startY = cursorY;
+      const placedChildren = visibleChildren.map((child) => place(child, depth + 1));
+      const endY = cursorY;
+      y = startY + (endY - startY - 54) / 2;
+      const layoutNode = toLayoutNode(node, x, y, depth);
+      nodes.push(layoutNode);
+      placedChildren.forEach((child) => links.push({ from: layoutNode, to: child }));
+      return layoutNode;
+    }
+
+    const layoutNode = toLayoutNode(node, x, y, depth);
+    nodes.push(layoutNode);
+    return layoutNode;
+  }
+
+  function toLayoutNode(node: MindMapNode, x: number, y: number, depth: number): MindMapLayoutNode {
+    return {
+      id: node.id,
+      label: node.label,
+      detail: node.detail,
+      timestamp: node.timestamp,
+      seconds: node.seconds,
+      x,
+      y,
+      depth,
+      hasChildren: node.children.length > 0
+    };
+  }
+
+  const totalHeight = measure(root);
+  place(root, 0);
+
+  return {
+    links,
+    nodes,
+    width: Math.max(760, 64 + (maxDepth + 1) * levelGap + nodeWidth),
+    height: Math.max(420, totalHeight + 84)
+  };
+}
+
+function mindMapPath(from: MindMapLayoutNode, to: MindMapLayoutNode): string {
+  const startX = from.x + mindMapNodeWidth;
+  const startY = from.y + 34;
+  const endX = to.x;
+  const endY = to.y + 34;
+  const midX = startX + (endX - startX) * 0.55;
+  return `M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function List({ items }: { items: string[] }) {
@@ -2413,6 +2835,8 @@ function tabLabel(tab: DetailTab, language: AppLanguage): string {
         return "Transcript";
       case "知识点":
         return "Knowledge";
+      case "思维导图":
+        return "Mind map";
     }
   }
   return tab;

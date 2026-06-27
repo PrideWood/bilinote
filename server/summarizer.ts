@@ -213,7 +213,7 @@ export async function summarizeKnowledgeTranscript(
         transcript,
         "",
         "请输出 JSON，字段为：overview(string), coreConclusions(string[]), knowledgeTree({topic:string,points:string[]}[]), logicFlow({title:string,explanation:string}[]), timelineNotes({timestamp:string,note:string}[]), terms({term:string,definition:string}[]), reviewQuestions(string[])。",
-        "要求：面向学习者，按知识逻辑展开；如果 transcript 只是闲聊或信息不足，请明确说明；时间轴笔记要引用 transcript 中的时间戳。"
+        "要求：面向学习者，按知识逻辑展开；如果 transcript 只是闲聊或信息不足，请明确说明；timelineNotes 要引用 transcript 中的时间戳。"
       ]
         .filter(Boolean)
         .join("\n")
@@ -233,7 +233,15 @@ export async function summarizeKnowledgeTranscript(
     }
 
     const parsed = parseModelJson(text);
-    return normalizeKnowledgeSummary(parsed, model);
+    const summary = normalizeKnowledgeSummary(parsed, model);
+    summary.mindMap = await summarizeMindMapTranscript({
+      ...input,
+      transcript: input.transcript,
+      client,
+      model,
+      modelTimeoutMs
+    });
+    return summary;
   } catch (error) {
     if (isRecoverableModelError(error)) {
       return buildLocalKnowledgeFallback(input, error instanceof Error ? error.message : "模型暂不可用");
@@ -456,9 +464,107 @@ function buildLocalKnowledgeFallback(input: KnowledgeSummarizeInput, reason: str
       };
     }),
     terms: [],
+    mindMap: buildFallbackMindMap(lines),
     reviewQuestions: ["这段视频主要讲了什么？", "哪些内容需要结合原视频进一步确认？"],
     model: "local-fallback"
   };
+}
+
+async function summarizeMindMapTranscript(input: KnowledgeSummarizeInput & {
+  client: OpenAI;
+  model: string;
+  modelTimeoutMs: number;
+}): Promise<NonNullable<KnowledgeSummary["mindMap"]>> {
+  const chunks = splitTranscriptForMindMap(input.transcript);
+  if (chunks.length === 0) {
+    return [];
+  }
+
+  const results: NonNullable<KnowledgeSummary["mindMap"]> = [];
+  for (const [index, chunk] of chunks.entries()) {
+    throwIfSignalAborted(input.signal);
+    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+      {
+        role: "system",
+        content:
+          "你是一个视频内容架构师。你要根据 transcript 按视频播放顺序生成思维导图，只输出 JSON，不要 Markdown。"
+      },
+      {
+        role: "user",
+        content: [
+          `视频文件名：${input.title}`,
+          input.userNotes ? `用户补充说明：${input.userNotes}` : "",
+          `这是 transcript 的第 ${index + 1}/${chunks.length} 段，请只梳理这一段覆盖的内容。`,
+          "transcript：",
+          chunk,
+          "",
+          "请输出 JSON：{\"mindMap\":[{\"title\":string,\"timestamp\":string,\"summary\":string,\"children\":[{\"title\":string,\"timestamp\":string,\"summary\":string,\"children\":[...]}]}]}。",
+          "要求：",
+          "1. 必须按视频内容出现顺序组织一级节点。",
+          "2. 不要把 transcript 原句搬成节点，要用更概括、更抽象的中文标题和总结。",
+          "3. 简单视频可以两级；只要内容有层次，就生成三级或四级 children。",
+          "4. 一级节点代表阶段/话题转换，二级及以下代表该阶段内的论点、例子、概念或情节推进。",
+          "5. 每个节点 timestamp 必须使用该节点内容第一次在 transcript 出现的时间戳。",
+          "6. 节点数量要克制：每段 transcript 输出 3-6 个一级节点，每个一级节点 2-5 个子节点。"
+        ]
+          .filter(Boolean)
+          .join("\n")
+      }
+    ];
+
+    try {
+      const response = await withTimeout(
+        createChatCompletion(input.client, {
+          model: input.model,
+          messages,
+          maxTokens: Number(process.env.OPENAI_MIND_MAP_MAX_TOKENS || 2500),
+          signal: input.signal
+        }),
+        input.modelTimeoutMs,
+        `思维导图请求超过 ${Math.round(input.modelTimeoutMs / 1000)} 秒未返回。`,
+        input.signal
+      );
+      const text = response.choices[0]?.message?.content;
+      if (!text) {
+        continue;
+      }
+      results.push(...normalizeMindMap(parseModelJson(text).mindMap));
+    } catch {
+      results.push(...buildFallbackMindMap(chunk.split("\n").filter(Boolean)));
+    }
+  }
+
+  return results;
+}
+
+function splitTranscriptForMindMap(transcript: string): string[] {
+  const maxChars = Number(process.env.MIND_MAP_TRANSCRIPT_CHUNK_CHARS || 5000);
+  const lines = transcript.split("\n").filter(Boolean);
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let currentLength = 0;
+
+  for (const line of lines) {
+    if (current.length > 0 && currentLength + line.length + 1 > maxChars) {
+      chunks.push(current.join("\n"));
+      current = [];
+      currentLength = 0;
+    }
+    current.push(line);
+    currentLength += line.length + 1;
+  }
+
+  if (current.length > 0) {
+    chunks.push(current.join("\n"));
+  }
+
+  return chunks;
+}
+
+function throwIfSignalAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new Error("任务已取消");
+  }
 }
 
 function normalizeKnowledgeSummary(parsed: Record<string, unknown>, model: string): KnowledgeSummary {
@@ -469,9 +575,38 @@ function normalizeKnowledgeSummary(parsed: Record<string, unknown>, model: strin
     logicFlow: normalizeLogicFlow(parsed.logicFlow),
     timelineNotes: normalizeTimelineNotes(parsed.timelineNotes),
     terms: normalizeTerms(parsed.terms),
+    mindMap: normalizeMindMap(parsed.mindMap),
     reviewQuestions: coerceTextArray(parsed.reviewQuestions),
     model
   };
+}
+
+function buildFallbackMindMap(lines: string[]): NonNullable<KnowledgeSummary["mindMap"]> {
+  const parsed = lines.slice(0, 16).map((line) => {
+    const match = line.match(/^\[([^\]]+)\]\s*(.*)$/);
+    return {
+      timestamp: match?.[1] ?? "00:00",
+      text: match?.[2] ?? line
+    };
+  });
+  const groupSize = 4;
+  const groups: NonNullable<KnowledgeSummary["mindMap"]> = [];
+  for (let index = 0; index < parsed.length; index += groupSize) {
+    const group = parsed.slice(index, index + groupSize);
+    const first = group[0];
+    groups.push({
+      title: `${first?.timestamp ?? "00:00"} 起的视频段落`,
+      timestamp: first?.timestamp ?? "00:00",
+      summary: group.map((item) => item.text).join(" / ").slice(0, 180),
+      children: group.map((item, childIndex) => ({
+        title: `要点 ${childIndex + 1}`,
+        timestamp: item.timestamp,
+        summary: item.text,
+        children: []
+      }))
+    });
+  }
+  return groups;
 }
 
 function normalizeKnowledgeTree(value: unknown): KnowledgeSummary["knowledgeTree"] {
@@ -524,6 +659,26 @@ function normalizeTerms(value: unknown): KnowledgeSummary["terms"] {
       definition: coerceText(record.definition ?? record.explanation)
     };
   });
+}
+
+function normalizeMindMap(value: unknown): NonNullable<KnowledgeSummary["mindMap"]> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item, index) => normalizeMindMapNode(item, index)).filter((item) => item.title);
+}
+
+function normalizeMindMapNode(value: unknown, index: number): NonNullable<KnowledgeSummary["mindMap"]>[number] {
+  const record = typeof value === "object" && value ? (value as Record<string, unknown>) : {};
+  const children = Array.isArray(record.children)
+    ? record.children.map((child, childIndex) => normalizeMindMapNode(child, childIndex)).filter((item) => item.title)
+    : [];
+  return {
+    title: coerceText(record.title ?? record.topic ?? record.label) || `节点 ${index + 1}`,
+    timestamp: coerceText(record.timestamp ?? record.time),
+    summary: coerceText(record.summary ?? record.note ?? record.content ?? record.explanation),
+    children
+  };
 }
 
 function prepareTranscriptForModel(transcript: string): string {

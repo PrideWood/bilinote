@@ -148,11 +148,12 @@ export async function downloadAudioFromOnlineVideo(
 export async function downloadSubtitleFromOnlineVideo(
   url: string,
   jobId: string,
-  options: { signal?: AbortSignal } = {}
+  options: { signal?: AbortSignal; title?: string } = {}
 ): Promise<string | undefined> {
   await ensureStorageDirs();
   const downloaderBin = process.env.ONLINE_VIDEO_DOWNLOADER_BIN_PATH || "yt-dlp";
   const outputTemplate = path.join(subtitleOutputDir, `${jobId}.%(ext)s`);
+  const subtitleLangs = resolveOnlineSubtitleLangs(options.title);
 
   try {
     await execFileAsync(
@@ -163,7 +164,7 @@ export async function downloadSubtitleFromOnlineVideo(
         "--write-subs",
         "--write-auto-subs",
         "--sub-langs",
-        process.env.ONLINE_SUBTITLE_LANGS || "zh-CN,zh-Hans,zh,en.*,en",
+        subtitleLangs,
         "--sub-format",
         "srt/vtt/best",
         "-o",
@@ -178,7 +179,7 @@ export async function downloadSubtitleFromOnlineVideo(
 
   const candidates = (await readdir(subtitleOutputDir))
     .filter((filename) => filename.startsWith(`${jobId}.`) && /\.(srt|vtt)$/i.test(filename))
-    .sort((left, right) => subtitlePriority(left) - subtitlePriority(right));
+    .sort((left, right) => subtitlePriority(left, subtitleLangs) - subtitlePriority(right, subtitleLangs));
 
   for (const filename of candidates) {
     const sourcePath = path.join(subtitleOutputDir, filename);
@@ -190,15 +191,74 @@ export async function downloadSubtitleFromOnlineVideo(
   return undefined;
 }
 
-function subtitlePriority(filename: string): number {
-  if (/zh-CN|zh-Hans|\.zh\./i.test(filename)) {
-    return 0;
+function resolveOnlineSubtitleLangs(title?: string): string {
+  const configured = process.env.ONLINE_SUBTITLE_LANGS?.trim();
+  if (configured) {
+    return configured;
   }
-  if (/zh/i.test(filename)) {
-    return 1;
+
+  switch (inferLanguageFromTitle(title ?? "")) {
+    case "zh":
+      return "zh-CN,zh-Hans,zh,en.*,en";
+    case "ja":
+      return "ja,ja.*,en.*,en,zh-CN,zh-Hans,zh";
+    case "ko":
+      return "ko,ko.*,en.*,en,zh-CN,zh-Hans,zh";
+    case "en":
+      return "en.*,en,zh-CN,zh-Hans,zh";
+    default:
+      return "en.*,en,zh-CN,zh-Hans,zh";
   }
-  if (/en/i.test(filename)) {
-    return 2;
+}
+
+function inferLanguageFromTitle(title: string): "zh" | "ja" | "ko" | "en" | "unknown" {
+  const text = title.trim();
+  if (!text) {
+    return "unknown";
   }
-  return 3;
+
+  const zhCount = countMatches(text, /[\u4e00-\u9fff]/g);
+  const jaCount = countMatches(text, /[\u3040-\u30ff]/g);
+  const koCount = countMatches(text, /[\uac00-\ud7af]/g);
+  if (jaCount > 0 && jaCount >= zhCount) {
+    return "ja";
+  }
+  if (koCount > 0) {
+    return "ko";
+  }
+  if (zhCount > 0) {
+    return "zh";
+  }
+
+  const latinCount = countMatches(text, /[A-Za-z]/g);
+  if (latinCount >= Math.max(6, Math.ceil(text.length * 0.35))) {
+    return "en";
+  }
+
+  return "unknown";
+}
+
+function countMatches(text: string, pattern: RegExp): number {
+  return text.match(pattern)?.length ?? 0;
+}
+
+function subtitlePriority(filename: string, subtitleLangs: string): number {
+  const priorities = subtitleLangs
+    .split(",")
+    .map((lang) => lang.trim())
+    .filter(Boolean);
+  const index = priorities.findIndex((lang) => subtitleFilenameMatchesLang(filename, lang));
+  return index >= 0 ? index : priorities.length;
+}
+
+function subtitleFilenameMatchesLang(filename: string, lang: string): boolean {
+  const escaped = escapeRegExp(lang.replace(/\.\*$/, ""));
+  if (!escaped) {
+    return false;
+  }
+  return new RegExp(`(^|[._-])${escaped}([._-]|$)`, "i").test(filename);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
